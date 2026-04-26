@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+graphify-out/
+Graphify.command
+Graphify.sh
+Graphify.desktop
+Graphify Explorer.app/
+.claude/

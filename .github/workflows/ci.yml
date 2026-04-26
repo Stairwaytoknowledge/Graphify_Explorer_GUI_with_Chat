@@ -1,0 +1,125 @@
+name: cross-platform-build
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      # Linux runners are headless and the GUI uses Tkinter — install
+      # the system Tk libs and a virtual X server so we can prove the
+      # window opens without a real display.
+      - name: Install Tk + Xvfb (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk xvfb
+
+      - name: Run installer (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          call Install-Windows.bat
+
+      - name: Run installer (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          chmod +x Install-macOS.command
+          # Skip the trailing `read` prompt by piping a newline.
+          printf '\n' | bash Install-macOS.command
+
+      - name: Run installer (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          chmod +x install-linux.sh
+          bash install-linux.sh
+
+      - name: Verify icon files were generated
+        shell: bash
+        run: |
+          test -f icon.png || (echo "icon.png missing" && exit 1)
+          test -f icon.ico || (echo "icon.ico missing" && exit 1)
+          echo "icon files OK"
+
+      - name: Verify graphify CLI is importable from venv
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            PY=".venv/Scripts/python.exe"
+          else
+            PY=".venv/bin/python"
+          fi
+          "$PY" -c "import graphify; print('graphify import OK:', graphify.__name__)"
+          # Confirm the console script exists.
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            test -f .venv/Scripts/graphify.exe || (echo "graphify.exe missing" && exit 1)
+          else
+            test -x .venv/bin/graphify || (echo "graphify CLI missing" && exit 1)
+          fi
+          echo "graphify CLI OK"
+
+      - name: Smoke-test GUI imports + headless window
+        shell: bash
+        env:
+          DISPLAY: ":99"
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            PY=".venv/Scripts/python.exe"
+          else
+            PY=".venv/bin/python"
+          fi
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            Xvfb :99 -screen 0 1024x768x24 &
+            sleep 1
+          fi
+          "$PY" - <<'PY'
+          import os, sys, threading
+          # Headless smoke: open the GUI, confirm it builds, then schedule a quit.
+          if sys.platform == "darwin" and not os.environ.get("DISPLAY"):
+              # macOS GitHub runners have an Aqua session — Tk should still work.
+              pass
+          import graphify_gui
+          import tkinter as tk
+          root = tk.Tk()
+          app = graphify_gui.GraphifyApp(root)
+          root.after(500, root.destroy)
+          root.mainloop()
+          print("GUI smoke OK")
+          PY
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: graphify-explorer-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: |
+            icon.png
+            icon.ico
+            graphify_gui.py
+            Install-Windows.bat
+            Install-macOS.command
+            install-linux.sh
+            Graphify.vbs
+            Graphify.bat
+          if-no-files-found: warn
