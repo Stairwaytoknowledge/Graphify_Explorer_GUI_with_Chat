@@ -69,18 +69,24 @@ knowledge graph.
 
 ## Using the GUI
 
-| Control                    | What it runs (under the hood)                         |
-| -------------------------- | ------------------------------------------------------ |
-| **Browse…**                | Pick the folder you want to analyze.                   |
-| **Mode** dropdown          | `normal` or `deep` (more aggressive edge extraction).  |
-| **Build Graph**            | `graphify <folder> [--mode deep]`                      |
-| **Update**                 | `graphify <folder> --update` (only re-extract changes) |
-| **Open Visualization**     | Opens `<folder>/graphify-out/graph.html`               |
-| **Open Report**            | Opens `<folder>/graphify-out/GRAPH_REPORT.md`          |
-| **Query** (with text)      | `graphify query "<text>"`                              |
-| **Explain** (with text)    | `graphify explain "<text>"`                            |
-| **Path Between (A\|B)**    | `graphify path "A" "B"` — type `A|B` in the box        |
-| **Stop**                   | Terminates the running graphify subprocess.            |
+| Control                     | What it runs (under the hood)                         |
+| --------------------------- | ------------------------------------------------------ |
+| **Browse…**                 | Pick the folder you want to analyze.                   |
+| **Build / Refresh Graph**   | `graphify update <folder>` (re-extracts code, no LLM)  |
+| **Watch (live rebuild)**    | `graphify watch <folder>` — rebuilds on every save     |
+| **Open Visualization**      | Opens `<folder>/graphify-out/graph.html`               |
+| **Open Report**             | Opens `<folder>/graphify-out/GRAPH_REPORT.md`          |
+| **Query** (with text)       | `graphify query "<text>"`                              |
+| **Explain** (with text)     | `graphify explain "<text>"`                            |
+| **Path Between (A\|B)**     | `graphify path "A" "B"` — type `A|B` in the box        |
+| **Stop**                    | Terminates the running graphify subprocess.            |
+
+> **Note on "deep" / multimodal mode:** the upstream `--mode deep` and
+> doc/paper/image semantic extraction live behind the `/graphify` slash
+> command in Claude Code (which is what calls Claude). The bare CLI used by
+> this GUI builds and queries the **code graph** locally without any API
+> key. For multimodal corpora, install Graphify as a Claude Code skill
+> (`graphify install` after `pip install graphifyy`) and use `/graphify`.
 
 Output (stdout + stderr) is streamed live into the bottom pane. The GUI never
 blocks: each command runs in a background thread.
