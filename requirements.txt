@@ -1,2 +1,4 @@
 graphifyy>=0.1
 matplotlib>=3.7
+# Required by `graphify watch` (file-system watcher).
+watchdog>=3.0
