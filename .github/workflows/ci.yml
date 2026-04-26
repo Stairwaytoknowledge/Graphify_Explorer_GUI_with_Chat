@@ -94,11 +94,6 @@ jobs:
             sleep 1
           fi
           "$PY" - <<'PY'
-          import os, sys, threading
-          # Headless smoke: open the GUI, confirm it builds, then schedule a quit.
-          if sys.platform == "darwin" and not os.environ.get("DISPLAY"):
-              # macOS GitHub runners have an Aqua session — Tk should still work.
-              pass
           import graphify_gui
           import tkinter as tk
           root = tk.Tk()
@@ -107,6 +102,31 @@ jobs:
           root.mainloop()
           print("GUI smoke OK")
           PY
+
+      - name: End-to-end: build a real graph and query it
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            GRAPHIFY=".venv/Scripts/graphify.exe"
+          else
+            GRAPHIFY=".venv/bin/graphify"
+          fi
+          mkdir -p e2e/src
+          cat > e2e/src/a.py <<'PY'
+          def hello(): return 1 + 1
+          PY
+          cat > e2e/src/b.py <<'PY'
+          from a import hello
+          def world(): return hello() * 2
+          PY
+          cd e2e
+          "../$GRAPHIFY" update .
+          test -f graphify-out/graph.json || (echo "graph.json missing" && exit 1)
+          test -f graphify-out/graph.html || (echo "graph.html missing" && exit 1)
+          test -f graphify-out/GRAPH_REPORT.md || (echo "GRAPH_REPORT.md missing" && exit 1)
+          "../$GRAPHIFY" query "what does hello do?"
+          "../$GRAPHIFY" explain "hello()"
+          echo "End-to-end OK"
 
       - name: Upload artifacts
         if: always()
