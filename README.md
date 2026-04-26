@@ -21,14 +21,20 @@ knowledge graph.
 
 - **One double-click installer per OS** — Windows, macOS, Linux.
 - A **GUI with an icon** (no terminal needed once installed):
-  - Pick any folder, then **Build Graph**, **Update**, **Query**, **Explain**,
-    or **Path Between** two nodes.
-  - **Open Visualization** opens the generated `graph.html` in your browser.
-  - **Open Report** opens `GRAPH_REPORT.md`.
+  - **Embedded graph viewer** — the knowledge graph is rendered inline
+    (matplotlib + networkx) with community-coloured nodes, edge weights,
+    and zoom/pan via the matplotlib toolbar.
+  - **Click any node** to populate the right-hand details card: label,
+    type, source file/line, community, degree, neighbours and relations.
+  - **Side-by-side query panel** — Query / Explain / Path A|B run against
+    the loaded graph, with output streamed live below the details card.
+  - One-click **Open HTML** / **Open Report** to fall back to the upstream
+    vis.js HTML and `GRAPH_REPORT.md` when you want them.
 - A self-contained Python virtual environment in `.venv/` next to the
   installer — nothing is installed system-wide.
-- Cross-platform GitHub Actions CI that **proves** the installer runs and
-  the GUI opens on Windows, macOS, and Linux.
+- Cross-platform GitHub Actions CI that **proves** the installer runs, the
+  GUI opens, and a real `graphify update` + `query` + `explain` round-trip
+  succeeds on Windows, macOS, and Linux.
 
 ---
 

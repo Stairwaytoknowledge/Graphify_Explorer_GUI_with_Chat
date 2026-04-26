@@ -1,10 +1,12 @@
 """Graphify Explorer — a Tkinter GUI front-end for the `graphify` CLI.
 
-Point it at any folder, build a knowledge graph, then ask questions.
+Pick a folder, build a knowledge graph, see it rendered inline, click any node
+for its details, and ask questions of the graph from the side panel.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import queue
 import shlex
@@ -18,6 +20,7 @@ from tkinter import (
     BOTH,
     DISABLED,
     END,
+    HORIZONTAL,
     LEFT,
     NORMAL,
     RIGHT,
@@ -25,14 +28,61 @@ from tkinter import (
     StringVar,
     Text,
     filedialog,
+    font as tkfont,
     messagebox,
     ttk,
 )
+
+# Optional deps. We import lazily so the GUI still opens (with a graceful
+# message in the graph pane) when matplotlib/networkx aren't installed.
+try:
+    import matplotlib
+
+    matplotlib.use("TkAgg")
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_tkagg import (
+        FigureCanvasTkAgg,
+        NavigationToolbar2Tk,
+    )
+    from matplotlib.figure import Figure
+
+    _MPL_OK = True
+except Exception as _mpl_err:
+    _MPL_OK = False
+
+try:
+    import networkx as nx
+
+    _NX_OK = True
+except Exception:
+    _NX_OK = False
 
 
 APP_DIR = Path(__file__).resolve().parent
 ICON_ICO = APP_DIR / "icon.ico"
 ICON_PNG = APP_DIR / "icon.png"
+
+
+# ----------------------------------------------------------------------- theme
+
+PALETTE = {
+    "bg":        "#101826",   # window background
+    "panel":     "#162033",   # panel background
+    "panel_alt": "#1d2a40",   # secondary panel
+    "fg":        "#e7ecf3",   # primary text
+    "fg_dim":    "#9aa6b8",   # secondary text
+    "accent":    "#5ac6ff",   # cyan accent
+    "accent2":   "#7c5cff",   # violet accent
+    "ok":        "#5fd38f",   # success
+    "warn":      "#ffb454",   # warning
+    "edge":      "#33415a",   # edges in the graph
+}
+
+# Small palette for community coloring on the graph.
+COMMUNITY_COLORS = [
+    "#5ac6ff", "#ff7a90", "#7c5cff", "#5fd38f", "#ffb454",
+    "#ff8b3d", "#3dd1c5", "#d2a4ff", "#ffd166", "#9bd4ff",
+]
 
 
 def graphify_executable() -> str | None:
@@ -46,23 +96,31 @@ def graphify_executable() -> str | None:
     for c in candidates:
         if c.exists():
             return str(c)
-    found = shutil.which("graphify")
-    return found
+    return shutil.which("graphify")
+
+
+# =============================================================== app
 
 
 class GraphifyApp:
     def __init__(self, root: Tk) -> None:
         self.root = root
         self.root.title("Graphify Explorer")
-        self.root.geometry("900x640")
-        self.root.minsize(720, 520)
+        self.root.geometry("1280x800")
+        self.root.minsize(960, 600)
         self._apply_icon()
+        self._apply_theme()
 
         self.path_var = StringVar(value=str(Path.home()))
         self.query_var = StringVar()
         self.status_var = StringVar(value="Ready.")
         self.proc: subprocess.Popen | None = None
         self.q: queue.Queue[str] = queue.Queue()
+        self.graph: object | None = None  # networkx Graph
+        self.node_positions: dict | None = None
+        self.node_artist = None
+        self.node_keys: list[str] = []
+        self.selected_node: str | None = None
 
         self._build_widgets()
         self._poll_output()
@@ -71,11 +129,9 @@ class GraphifyApp:
         if graphify:
             self._set_status(f"graphify: {graphify}")
         else:
-            self._set_status(
-                "graphify CLI not found. Run launch.bat / launch.sh to bootstrap."
-            )
+            self._set_status("graphify CLI not found. Run the installer first.")
 
-    # ------------------------------------------------------------------ UI
+    # ---------------------------------------------------------- chrome
 
     def _apply_icon(self) -> None:
         try:
@@ -93,78 +149,469 @@ class GraphifyApp:
         except Exception:
             pass
 
+    def _apply_theme(self) -> None:
+        self.root.configure(bg=PALETTE["bg"])
+        style = ttk.Style()
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+        base_font = ("Segoe UI", 10) if os.name == "nt" else ("Helvetica", 11)
+        title_font = (base_font[0], base_font[1] + 2, "bold")
+        mono_font = ("Consolas", 10) if os.name == "nt" else ("Menlo", 10)
+
+        self.root.option_add("*Font", base_font)
+        self._title_font = title_font
+        self._mono_font = mono_font
+
+        style.configure(".", background=PALETTE["bg"], foreground=PALETTE["fg"])
+        style.configure("TFrame", background=PALETTE["bg"])
+        style.configure("Panel.TFrame", background=PALETTE["panel"])
+        style.configure(
+            "TLabel", background=PALETTE["bg"], foreground=PALETTE["fg"]
+        )
+        style.configure(
+            "Dim.TLabel",
+            background=PALETTE["bg"],
+            foreground=PALETTE["fg_dim"],
+        )
+        style.configure(
+            "Title.TLabel",
+            background=PALETTE["bg"],
+            foreground=PALETTE["fg"],
+            font=title_font,
+        )
+        style.configure(
+            "Status.TLabel",
+            background=PALETTE["panel"],
+            foreground=PALETTE["fg_dim"],
+        )
+        style.configure(
+            "TButton",
+            background=PALETTE["panel_alt"],
+            foreground=PALETTE["fg"],
+            borderwidth=0,
+            focusthickness=0,
+            padding=(10, 6),
+        )
+        style.map(
+            "TButton",
+            background=[
+                ("active", PALETTE["accent"]),
+                ("disabled", PALETTE["panel"]),
+            ],
+            foreground=[("active", "#0b1220")],
+        )
+        style.configure(
+            "Accent.TButton",
+            background=PALETTE["accent"],
+            foreground="#0b1220",
+            padding=(12, 7),
+        )
+        style.map(
+            "Accent.TButton",
+            background=[("active", PALETTE["accent2"])],
+            foreground=[("active", PALETTE["fg"])],
+        )
+        style.configure(
+            "TEntry",
+            fieldbackground=PALETTE["panel_alt"],
+            foreground=PALETTE["fg"],
+            insertcolor=PALETTE["fg"],
+            borderwidth=0,
+        )
+        style.configure(
+            "TLabelframe",
+            background=PALETTE["bg"],
+            foreground=PALETTE["fg"],
+            bordercolor=PALETTE["panel_alt"],
+        )
+        style.configure(
+            "TLabelframe.Label",
+            background=PALETTE["bg"],
+            foreground=PALETTE["accent"],
+            font=(base_font[0], base_font[1], "bold"),
+        )
+        style.configure(
+            "Vertical.TScrollbar",
+            background=PALETTE["panel"],
+            troughcolor=PALETTE["bg"],
+            bordercolor=PALETTE["bg"],
+            arrowcolor=PALETTE["fg_dim"],
+        )
+        style.configure(
+            "Horizontal.TScrollbar",
+            background=PALETTE["panel"],
+            troughcolor=PALETTE["bg"],
+            bordercolor=PALETTE["bg"],
+            arrowcolor=PALETTE["fg_dim"],
+        )
+        style.configure(
+            "TPanedwindow", background=PALETTE["bg"]
+        )
+
+    # ---------------------------------------------------------- widgets
+
     def _build_widgets(self) -> None:
-        pad = {"padx": 8, "pady": 4}
-
+        # Top bar -----------------------------------------------------------
         top = ttk.Frame(self.root)
-        top.pack(side="top", fill="x", **pad)
+        top.pack(side="top", fill="x", padx=12, pady=(12, 6))
 
-        ttk.Label(top, text="Folder to graph:").pack(side=LEFT)
+        ttk.Label(top, text="Folder", style="Dim.TLabel").pack(side=LEFT, padx=(0, 6))
         entry = ttk.Entry(top, textvariable=self.path_var)
-        entry.pack(side=LEFT, fill="x", expand=True, padx=6)
-        ttk.Button(top, text="Browse...", command=self._browse).pack(side=LEFT)
+        entry.pack(side=LEFT, fill="x", expand=True, padx=(0, 6))
+        ttk.Button(top, text="Browse…", command=self._browse).pack(side=LEFT)
 
-        opts = ttk.Frame(self.root)
-        opts.pack(side="top", fill="x", **pad)
-        ttk.Button(opts, text="Build / Refresh Graph", command=self._update_graph).pack(
-            side=LEFT, padx=2
+        actions = ttk.Frame(self.root)
+        actions.pack(side="top", fill="x", padx=12, pady=(0, 8))
+        ttk.Button(
+            actions,
+            text="Build / Refresh Graph",
+            style="Accent.TButton",
+            command=self._update_graph,
+        ).pack(side=LEFT, padx=(0, 6))
+        ttk.Button(actions, text="Watch", command=self._watch).pack(side=LEFT, padx=4)
+        ttk.Button(actions, text="Reload View", command=self._load_graph_into_view).pack(
+            side=LEFT, padx=4
         )
-        ttk.Button(opts, text="Watch (live rebuild)", command=self._watch).pack(
-            side=LEFT, padx=2
+        ttk.Button(actions, text="Open HTML", command=self._open_html).pack(
+            side=LEFT, padx=4
         )
-        ttk.Button(opts, text="Open Visualization", command=self._open_html).pack(
-            side=LEFT, padx=2
+        ttk.Button(actions, text="Open Report", command=self._open_report).pack(
+            side=LEFT, padx=4
         )
-        ttk.Button(opts, text="Open Report", command=self._open_report).pack(
-            side=LEFT, padx=2
-        )
-        ttk.Button(opts, text="Stop", command=self._stop).pack(side=RIGHT, padx=2)
+        ttk.Button(actions, text="Stop", command=self._stop).pack(side=RIGHT)
 
-        qf = ttk.LabelFrame(self.root, text="Query the graph")
-        qf.pack(side="top", fill="x", **pad)
-        ttk.Entry(qf, textvariable=self.query_var).pack(
-            side=LEFT, fill="x", expand=True, padx=6, pady=6
-        )
-        ttk.Button(qf, text="Query", command=self._query).pack(side=LEFT, padx=2, pady=6)
-        ttk.Button(qf, text="Explain", command=self._explain).pack(
-            side=LEFT, padx=2, pady=6
-        )
-        ttk.Button(qf, text="Path Between (A|B)", command=self._path_between).pack(
-            side=LEFT, padx=2, pady=6
-        )
+        # Main split (graph | details) -------------------------------------
+        paned = ttk.Panedwindow(self.root, orient=HORIZONTAL)
+        paned.pack(side="top", fill=BOTH, expand=True, padx=12, pady=6)
 
-        outf = ttk.LabelFrame(self.root, text="Output")
-        outf.pack(side="top", fill=BOTH, expand=True, **pad)
-        self.output = Text(outf, wrap="word", height=20)
-        scroll = ttk.Scrollbar(outf, orient="vertical", command=self.output.yview)
-        self.output.configure(yscrollcommand=scroll.set)
-        scroll.pack(side=RIGHT, fill="y")
-        self.output.pack(side=LEFT, fill=BOTH, expand=True)
+        # --- left: graph viz
+        graph_frame = ttk.Frame(paned, style="Panel.TFrame")
+        paned.add(graph_frame, weight=3)
+        self._build_graph_pane(graph_frame)
 
-        bar = ttk.Frame(self.root)
+        # --- right: details + query + output
+        right = ttk.Frame(paned, style="Panel.TFrame")
+        paned.add(right, weight=2)
+        self._build_right_pane(right)
+
+        # Status bar --------------------------------------------------------
+        bar = ttk.Frame(self.root, style="Panel.TFrame")
         bar.pack(side="bottom", fill="x")
-        ttk.Label(bar, textvariable=self.status_var, anchor="w").pack(
-            side=LEFT, fill="x", expand=True, padx=8, pady=4
+        ttk.Label(bar, textvariable=self.status_var, style="Status.TLabel").pack(
+            side=LEFT, padx=10, pady=6
         )
         ttk.Button(bar, text="Clear Output", command=self._clear).pack(
             side=RIGHT, padx=8, pady=4
         )
 
-    # ------------------------------------------------------------------ actions
+    def _build_graph_pane(self, parent: ttk.Frame) -> None:
+        header = ttk.Label(parent, text="Knowledge Graph", style="Title.TLabel")
+        header.pack(anchor="w", padx=10, pady=(8, 4))
+        self.graph_meta_var = StringVar(
+            value="No graph loaded. Pick a folder and Build / Refresh."
+        )
+        ttk.Label(
+            parent, textvariable=self.graph_meta_var, style="Dim.TLabel"
+        ).pack(anchor="w", padx=10)
+
+        self.graph_container = ttk.Frame(parent, style="Panel.TFrame")
+        self.graph_container.pack(fill=BOTH, expand=True, padx=8, pady=8)
+
+        if not (_MPL_OK and _NX_OK):
+            ttk.Label(
+                self.graph_container,
+                text=(
+                    "matplotlib + networkx are required to render the graph "
+                    "in-app.\nReinstall via the installer or run\n"
+                    "    .venv/bin/pip install matplotlib networkx"
+                ),
+                style="Dim.TLabel",
+                justify="left",
+            ).pack(padx=20, pady=20)
+            self.figure = None
+            self.canvas = None
+            return
+
+        self.figure = Figure(figsize=(7, 5), dpi=100, facecolor=PALETTE["panel"])
+        self.ax = self.figure.add_subplot(111)
+        self._style_axes()
+        self.canvas = FigureCanvasTkAgg(self.figure, master=self.graph_container)
+        self.canvas.get_tk_widget().pack(fill=BOTH, expand=True)
+        toolbar = NavigationToolbar2Tk(self.canvas, parent, pack_toolbar=False)
+        toolbar.config(background=PALETTE["panel"])
+        for child in toolbar.winfo_children():
+            try:
+                child.config(background=PALETTE["panel"])
+            except Exception:
+                pass
+        toolbar.update()
+        toolbar.pack(fill="x", padx=8, pady=(0, 6))
+        self.canvas.mpl_connect("pick_event", self._on_pick)
+
+    def _build_right_pane(self, parent: ttk.Frame) -> None:
+        # Selected-node card
+        card = ttk.Frame(parent, style="Panel.TFrame")
+        card.pack(fill="x", padx=10, pady=(10, 6))
+        ttk.Label(card, text="Selected node", style="Title.TLabel").pack(
+            anchor="w", padx=4
+        )
+        self.detail_text = Text(
+            card,
+            height=8,
+            wrap="word",
+            background=PALETTE["panel_alt"],
+            foreground=PALETTE["fg"],
+            insertbackground=PALETTE["fg"],
+            relief="flat",
+            borderwidth=0,
+            padx=10,
+            pady=8,
+        )
+        self.detail_text.pack(fill="x", padx=4, pady=4)
+        self._set_detail_placeholder()
+
+        # Query row
+        qf = ttk.Frame(parent, style="Panel.TFrame")
+        qf.pack(fill="x", padx=10, pady=(4, 6))
+        ttk.Label(qf, text="Ask the graph", style="Title.TLabel").pack(
+            anchor="w", padx=4
+        )
+        ttk.Entry(qf, textvariable=self.query_var).pack(
+            fill="x", padx=4, pady=(4, 6)
+        )
+        btnrow = ttk.Frame(qf, style="Panel.TFrame")
+        btnrow.pack(fill="x", padx=4)
+        ttk.Button(btnrow, text="Query", style="Accent.TButton", command=self._query).pack(
+            side=LEFT, padx=(0, 6)
+        )
+        ttk.Button(btnrow, text="Explain", command=self._explain).pack(
+            side=LEFT, padx=4
+        )
+        ttk.Button(
+            btnrow, text="Path A|B", command=self._path_between
+        ).pack(side=LEFT, padx=4)
+        ttk.Button(
+            btnrow,
+            text="Use selected",
+            command=self._fill_query_with_selected,
+        ).pack(side=RIGHT)
+
+        # Output / explanation pane
+        out = ttk.Frame(parent, style="Panel.TFrame")
+        out.pack(fill=BOTH, expand=True, padx=10, pady=(4, 10))
+        ttk.Label(out, text="Output", style="Title.TLabel").pack(
+            anchor="w", padx=4
+        )
+        text_frame = ttk.Frame(out, style="Panel.TFrame")
+        text_frame.pack(fill=BOTH, expand=True, padx=4, pady=4)
+        self.output = Text(
+            text_frame,
+            wrap="word",
+            background=PALETTE["panel_alt"],
+            foreground=PALETTE["fg"],
+            insertbackground=PALETTE["fg"],
+            relief="flat",
+            borderwidth=0,
+            padx=10,
+            pady=8,
+            font=self._mono_font,
+        )
+        scroll = ttk.Scrollbar(
+            text_frame, orient="vertical", command=self.output.yview
+        )
+        self.output.configure(yscrollcommand=scroll.set)
+        scroll.pack(side=RIGHT, fill="y")
+        self.output.pack(side=LEFT, fill=BOTH, expand=True)
+
+        self.output.tag_configure("dim", foreground=PALETTE["fg_dim"])
+        self.output.tag_configure("ok", foreground=PALETTE["ok"])
+        self.output.tag_configure("warn", foreground=PALETTE["warn"])
+        self.output.tag_configure(
+            "cmd", foreground=PALETTE["accent"], font=self._mono_font
+        )
+
+    # ---------------------------------------------------------- graph drawing
+
+    def _style_axes(self) -> None:
+        if not _MPL_OK:
+            return
+        self.ax.set_facecolor(PALETTE["panel"])
+        for spine in self.ax.spines.values():
+            spine.set_visible(False)
+        self.ax.set_xticks([])
+        self.ax.set_yticks([])
+
+    def _graph_path(self) -> Path | None:
+        path = self._selected_path(silent=True)
+        if not path:
+            return None
+        return path / "graphify-out" / "graph.json"
+
+    def _load_graph_into_view(self) -> None:
+        if not (_MPL_OK and _NX_OK):
+            return
+        gp = self._graph_path()
+        if not gp or not gp.exists():
+            self.graph_meta_var.set(
+                "No graph.json found. Click Build / Refresh first."
+            )
+            return
+        try:
+            data = json.loads(gp.read_text(encoding="utf-8"))
+            G = nx.node_link_graph(data, edges="links")
+        except Exception as exc:
+            messagebox.showerror("Load failed", f"Could not parse graph.json:\n{exc}")
+            return
+        self.graph = G
+        self._render_graph(G)
+        self.graph_meta_var.set(
+            f"{G.number_of_nodes()} nodes · {G.number_of_edges()} edges · "
+            f"loaded from {gp}"
+        )
+
+    def _render_graph(self, G) -> None:
+        self.ax.clear()
+        self._style_axes()
+        if G.number_of_nodes() == 0:
+            self.ax.text(
+                0.5, 0.5, "Empty graph",
+                color=PALETTE["fg_dim"],
+                ha="center", va="center", transform=self.ax.transAxes,
+            )
+            self.canvas.draw_idle()
+            return
+
+        seed = 7
+        if G.number_of_nodes() <= 200:
+            pos = nx.spring_layout(G, seed=seed, k=None)
+        else:
+            pos = nx.kamada_kawai_layout(G)
+
+        # edges
+        for u, v in G.edges():
+            x0, y0 = pos[u]
+            x1, y1 = pos[v]
+            self.ax.plot(
+                [x0, x1], [y0, y1],
+                color=PALETTE["edge"], linewidth=0.9, alpha=0.7, zorder=1,
+            )
+
+        # nodes — colored by community when present
+        keys = list(G.nodes())
+        xs = [pos[k][0] for k in keys]
+        ys = [pos[k][1] for k in keys]
+        colors = []
+        for k in keys:
+            comm = G.nodes[k].get("community", 0)
+            colors.append(COMMUNITY_COLORS[int(comm) % len(COMMUNITY_COLORS)])
+        sizes = [120 + 40 * G.degree(k) for k in keys]
+        self.node_artist = self.ax.scatter(
+            xs, ys,
+            c=colors, s=sizes,
+            edgecolors="#0b1220", linewidths=0.8,
+            picker=True, pickradius=8, zorder=3,
+        )
+        self.node_keys = keys
+        self.node_positions = pos
+
+        # labels (cap to 60 to keep readable)
+        if len(keys) <= 60:
+            for k in keys:
+                lbl = G.nodes[k].get("label", k)
+                self.ax.text(
+                    pos[k][0], pos[k][1] + 0.04,
+                    lbl,
+                    color=PALETTE["fg"],
+                    fontsize=8, ha="center", va="bottom", zorder=4,
+                )
+
+        self.ax.margins(0.10)
+        self.canvas.draw_idle()
+
+    def _on_pick(self, event) -> None:
+        if not self.node_keys or event.artist is not self.node_artist:
+            return
+        ind = event.ind
+        if not len(ind):
+            return
+        key = self.node_keys[int(ind[0])]
+        self.selected_node = key
+        self._show_node_details(key)
+
+    # ---------------------------------------------------------- right panel
+
+    def _set_detail_placeholder(self) -> None:
+        self.detail_text.configure(state=NORMAL)
+        self.detail_text.delete("1.0", END)
+        self.detail_text.insert(
+            END,
+            "Click a node in the graph to see its label, source file, "
+            "community, and immediate neighbors here.",
+        )
+        self.detail_text.configure(state=DISABLED)
+
+    def _show_node_details(self, key: str) -> None:
+        if not self.graph:
+            return
+        attrs = dict(self.graph.nodes[key])
+        label = attrs.get("label", key)
+        community = attrs.get("community", "?")
+        src = attrs.get("source_file", "?")
+        loc = attrs.get("source_location", "")
+        ftype = attrs.get("file_type", "?")
+
+        neighbors = list(self.graph.neighbors(key))
+        rels = []
+        for n in neighbors[:20]:
+            edata = self.graph.get_edge_data(key, n) or {}
+            rel = edata.get("relation", "?")
+            conf = edata.get("confidence", "")
+            rels.append(f"  • {rel:<10} → {self.graph.nodes[n].get('label', n)} [{conf}]")
+
+        lines = [
+            f"Label:     {label}",
+            f"Type:      {ftype}",
+            f"Source:    {src}{(' ' + loc) if loc else ''}",
+            f"Community: {community}",
+            f"Degree:    {self.graph.degree(key)}",
+            "",
+            "Neighbors:",
+            *(rels if rels else ["  (none)"]),
+        ]
+        self.detail_text.configure(state=NORMAL)
+        self.detail_text.delete("1.0", END)
+        self.detail_text.insert(END, "\n".join(lines))
+        self.detail_text.configure(state=DISABLED)
+
+    def _fill_query_with_selected(self) -> None:
+        if self.selected_node and self.graph:
+            self.query_var.set(self.graph.nodes[self.selected_node].get(
+                "label", self.selected_node
+            ))
+
+    # ---------------------------------------------------------- actions
 
     def _browse(self) -> None:
-        chosen = filedialog.askdirectory(initialdir=self.path_var.get() or str(Path.home()))
+        chosen = filedialog.askdirectory(
+            initialdir=self.path_var.get() or str(Path.home())
+        )
         if chosen:
             self.path_var.set(chosen)
+            # Try auto-loading any existing graph for this folder.
+            self._load_graph_into_view()
 
-    def _selected_path(self) -> Path | None:
+    def _selected_path(self, silent: bool = False) -> Path | None:
         p = self.path_var.get().strip()
         if not p:
-            messagebox.showwarning("No folder", "Pick a folder first.")
+            if not silent:
+                messagebox.showwarning("No folder", "Pick a folder first.")
             return None
         path = Path(p).expanduser()
         if not path.exists():
-            messagebox.showerror("Missing", f"Path does not exist:\n{path}")
+            if not silent:
+                messagebox.showerror("Missing", f"Path does not exist:\n{path}")
             return None
         return path
 
@@ -172,7 +619,7 @@ class GraphifyApp:
         path = self._selected_path()
         if not path:
             return
-        self._run_graphify(["update", str(path)], cwd=path)
+        self._run_graphify(["update", str(path)], cwd=path, then_load=True)
 
     def _watch(self) -> None:
         path = self._selected_path()
@@ -247,9 +694,14 @@ class GraphifyApp:
     def _clear(self) -> None:
         self.output.delete("1.0", END)
 
-    # ------------------------------------------------------------------ subprocess
+    # ---------------------------------------------------------- subprocess
 
-    def _run_graphify(self, args: list[str], cwd: Path) -> None:
+    def _run_graphify(
+        self,
+        args: list[str],
+        cwd: Path,
+        then_load: bool = False,
+    ) -> None:
         if self.proc and self.proc.poll() is None:
             messagebox.showinfo("Busy", "A graphify command is already running.")
             return
@@ -258,13 +710,14 @@ class GraphifyApp:
             messagebox.showerror(
                 "graphify not found",
                 "Could not locate the graphify CLI.\n\n"
-                "Run launch.bat (Windows) or launch.sh (macOS/Linux) so it can\n"
-                "bootstrap a venv and install graphifyy.",
+                "Run Install-Windows.bat / Install-macOS.command / "
+                "install-linux.sh first.",
             )
             return
         cmd = [exe, *args]
-        self._append(f"\n$ {' '.join(shlex.quote(c) for c in cmd)}\n  (cwd: {cwd})\n")
-        self._set_status("Running...")
+        self._append(f"$ {' '.join(shlex.quote(c) for c in cmd)}\n", "cmd")
+        self._append(f"  (cwd: {cwd})\n", "dim")
+        self._set_status("Running…")
         try:
             self.proc = subprocess.Popen(
                 cmd,
@@ -275,34 +728,45 @@ class GraphifyApp:
                 bufsize=1,
             )
         except Exception as exc:
-            self._append(f"[error] {exc}\n")
+            self._append(f"[error] {exc}\n", "warn")
             self._set_status("Failed to start graphify.")
             return
-        threading.Thread(target=self._reader_thread, args=(self.proc,), daemon=True).start()
+        self._then_load = then_load
+        threading.Thread(
+            target=self._reader_thread, args=(self.proc,), daemon=True
+        ).start()
 
     def _reader_thread(self, proc: subprocess.Popen) -> None:
         assert proc.stdout is not None
         for line in proc.stdout:
             self.q.put(line)
         proc.wait()
-        self.q.put(f"\n[exit {proc.returncode}]\n")
+        self.q.put(f"[exit {proc.returncode}]\n")
 
     def _poll_output(self) -> None:
         try:
             while True:
                 line = self.q.get_nowait()
-                self._append(line)
-                if line.startswith("\n[exit "):
-                    self._set_status("Done.")
+                if line.startswith("[exit "):
+                    self._append(line, "ok" if "0]" in line else "warn")
+                    self._set_status("Done." if "0]" in line else "Finished with errors.")
+                    if getattr(self, "_then_load", False) and "0]" in line:
+                        self._load_graph_into_view()
+                        self._then_load = False
+                else:
+                    self._append(line)
         except queue.Empty:
             pass
         self.root.after(80, self._poll_output)
 
-    # ------------------------------------------------------------------ small helpers
+    # ---------------------------------------------------------- helpers
 
-    def _append(self, text: str) -> None:
+    def _append(self, text: str, tag: str | None = None) -> None:
         self.output.configure(state=NORMAL)
-        self.output.insert(END, text)
+        if tag:
+            self.output.insert(END, text, tag)
+        else:
+            self.output.insert(END, text)
         self.output.see(END)
 
     def _set_status(self, msg: str) -> None:
@@ -311,10 +775,6 @@ class GraphifyApp:
 
 def main() -> int:
     root = Tk()
-    try:
-        ttk.Style().theme_use("vista" if os.name == "nt" else "clam")
-    except Exception:
-        pass
     GraphifyApp(root)
     root.mainloop()
     return 0
