@@ -60,7 +60,6 @@ class GraphifyApp:
 
         self.path_var = StringVar(value=str(Path.home()))
         self.query_var = StringVar()
-        self.mode_var = StringVar(value="normal")
         self.status_var = StringVar(value="Ready.")
         self.proc: subprocess.Popen | None = None
         self.q: queue.Queue[str] = queue.Queue()
@@ -107,19 +106,10 @@ class GraphifyApp:
 
         opts = ttk.Frame(self.root)
         opts.pack(side="top", fill="x", **pad)
-        ttk.Label(opts, text="Mode:").pack(side=LEFT)
-        ttk.Combobox(
-            opts,
-            textvariable=self.mode_var,
-            values=["normal", "deep"],
-            width=10,
-            state="readonly",
-        ).pack(side=LEFT, padx=(4, 16))
-
-        ttk.Button(opts, text="Build Graph", command=self._build_graph).pack(
+        ttk.Button(opts, text="Build / Refresh Graph", command=self._update_graph).pack(
             side=LEFT, padx=2
         )
-        ttk.Button(opts, text="Update", command=self._update_graph).pack(
+        ttk.Button(opts, text="Watch (live rebuild)", command=self._watch).pack(
             side=LEFT, padx=2
         )
         ttk.Button(opts, text="Open Visualization", command=self._open_html).pack(
@@ -178,20 +168,17 @@ class GraphifyApp:
             return None
         return path
 
-    def _build_graph(self) -> None:
-        path = self._selected_path()
-        if not path:
-            return
-        args = [str(path)]
-        if self.mode_var.get() == "deep":
-            args += ["--mode", "deep"]
-        self._run_graphify(args, cwd=path)
-
     def _update_graph(self) -> None:
         path = self._selected_path()
         if not path:
             return
-        self._run_graphify([str(path), "--update"], cwd=path)
+        self._run_graphify(["update", str(path)], cwd=path)
+
+    def _watch(self) -> None:
+        path = self._selected_path()
+        if not path:
+            return
+        self._run_graphify(["watch", str(path)], cwd=path)
 
     def _query(self) -> None:
         self._run_query("query")
