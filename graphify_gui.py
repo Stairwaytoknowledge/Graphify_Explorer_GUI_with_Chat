@@ -686,6 +686,9 @@ class GraphifyApp:
         self.chat_history: list[dict] = []
         self.chat_stop_event = threading.Event()
         self.chat_thread: threading.Thread | None = None
+        # Cross-thread queue for the background model probe - the poller
+        # drains it on the main thread so we never touch Tk from a worker.
+        self._model_probe_result: queue.Queue = queue.Queue()
 
         # Initial model probe (runs in background - don't block UI startup).
         threading.Thread(target=self._refresh_models_async, daemon=True).start()
@@ -696,33 +699,50 @@ class GraphifyApp:
         threading.Thread(target=self._refresh_models_async, daemon=True).start()
 
     def _refresh_models_async(self) -> None:
+        # Worker thread - do NOT touch Tk widgets from here. Push the result
+        # onto a queue; the main-thread poller picks it up.
         if not self.ollama.is_up():
-            self.root.after(
-                0,
-                lambda: self.chat_status_var.set(
-                    "Ollama not running on localhost:11434. "
-                    "Install from https://ollama.com and `ollama pull qwen2.5:7b`."
-                ),
-            )
+            self._model_probe_result.put(("status", (
+                "Ollama not running on localhost:11434. "
+                "Install from https://ollama.com and `ollama pull qwen2.5:7b`."
+            )))
             return
         models = self.ollama.list_models()
-        def apply():
-            if models:
-                self.chat_model_combo["values"] = models
-                if not self.chat_model_var.get() or self.chat_model_var.get() not in models:
-                    # Prefer a code-focused model if present.
-                    preferred = next(
-                        (m for m in models if "coder" in m.lower() or "code" in m.lower()),
-                        models[0],
+        if models:
+            self._model_probe_result.put(("models", models))
+        else:
+            self._model_probe_result.put(("status", (
+                "Ollama is up but no chat models installed. "
+                "Try `ollama pull qwen2.5:7b`."
+            )))
+
+    def _drain_model_probe(self) -> None:
+        """Called from the main-thread poll tick - safe to touch Tk."""
+        try:
+            while True:
+                kind, payload = self._model_probe_result.get_nowait()
+                if kind == "status":
+                    self.chat_status_var.set(payload)
+                elif kind == "models":
+                    self.chat_model_combo["values"] = payload
+                    if (
+                        not self.chat_model_var.get()
+                        or self.chat_model_var.get() not in payload
+                    ):
+                        preferred = next(
+                            (
+                                m
+                                for m in payload
+                                if "coder" in m.lower() or "code" in m.lower()
+                            ),
+                            payload[0],
+                        )
+                        self.chat_model_var.set(preferred)
+                    self.chat_status_var.set(
+                        f"connected - {len(payload)} model(s) available"
                     )
-                    self.chat_model_var.set(preferred)
-                self.chat_status_var.set(f"connected - {len(models)} model(s) available")
-            else:
-                self.chat_status_var.set(
-                    "Ollama is up but no chat models installed. "
-                    "Try `ollama pull qwen2.5:7b`."
-                )
-        self.root.after(0, apply)
+        except queue.Empty:
+            pass
 
     def _chat_clear(self) -> None:
         self.chat_history = []
@@ -774,6 +794,14 @@ class GraphifyApp:
         self.chat_thread.start()
 
     def _chat_worker(self, question: str, model: str) -> None:
+        """Two-stage 'LLM-wiki' retrieval, then streamed answer.
+
+        Stage A: Show the model a TOC of the graph (top nodes per community)
+                 plus the GRAPH_REPORT excerpt and the conversation so far.
+                 Ask it to pick the node ids it wants to read.
+        Stage B: Read the picked nodes' source + their immediate neighbours.
+        Stage C: Stream a citation-grounded answer over that focused context.
+        """
         path: Path | None = None
         try:
             p = self.path_var.get().strip()
@@ -782,63 +810,86 @@ class GraphifyApp:
         except Exception:
             pass
 
-        # 1. Pull a BFS slice of the graph for the question.
-        graph_query_out = self._run_graphify_capture(
-            ["query", question, "--budget", "1500"], cwd=path
-        )
+        # ---------- Stage A: build a TOC + plan retrieval -------------------
+        toc, all_ids = self._build_graph_toc(path)
+        report_excerpt = self._read_report_excerpt(path, limit=1500)
 
-        # 2. For every node mentioned in that BFS output, pull its source
-        #    snippet so the model has actual code to reason about, not just
-        #    labels. This is the single biggest hallucination reducer.
-        source_snippets = self._collect_source_snippets(graph_query_out, path)
-
-        ctx_lines: list[str] = []
-        if graph_query_out:
-            ctx_lines.append("=== Graph BFS (from `graphify query`) ===")
-            ctx_lines.append(graph_query_out.strip()[:3500])
-            ctx_lines.append("")
-        if source_snippets:
-            ctx_lines.append("=== Source snippets for cited nodes ===")
-            ctx_lines.extend(source_snippets)
-            ctx_lines.append("")
-        if path:
-            report = path / "graphify-out" / "GRAPH_REPORT.md"
-            if report.exists():
-                try:
-                    text = report.read_text(encoding="utf-8")
-                    ctx_lines.append("=== GRAPH_REPORT.md (excerpt) ===")
-                    ctx_lines.append(text[:2000])
-                except Exception:
-                    pass
-
-        context = "\n".join(ctx_lines).strip()
-        if not context:
-            context = (
-                "(no graph context available - the user has not built a "
-                "graph for the current folder yet)"
+        picked: list[str] = []
+        if toc and all_ids:
+            picked = self._plan_retrieval(
+                model=model,
+                question=question,
+                toc=toc,
+                report=report_excerpt,
+                valid_ids=all_ids,
             )
 
-        # 3. Strict system prompt: refusal-by-default, citation format,
-        #    no implementation guesses without source.
+        # Always also keep the BFS slice as a backstop - it sometimes
+        # surfaces nodes the planning step misses.
+        bfs_out = self._run_graphify_capture(
+            ["query", question, "--budget", "1200"], cwd=path
+        )
+
+        # ---------- Stage B: drill into picked nodes ------------------------
+        snippets = self._snippets_for_node_ids(picked, path)
+        bfs_snippets = self._collect_source_snippets(bfs_out, path)
+
+        # Tell the user what the planner actually chose (transparent retrieval).
+        def announce():
+            if picked:
+                self._chat_append("\n[retrieved: ", "system")
+                self._chat_append(", ".join(picked[:8]), "citation")
+                self._chat_append("]\n", "system")
+            elif bfs_snippets:
+                self._chat_append(
+                    "\n[planner picked nothing; falling back to BFS]\n",
+                    "system",
+                )
+            else:
+                self._chat_append(
+                    "\n[no graph context available for this question]\n",
+                    "system",
+                )
+        self.root.after(0, announce)
+
+        # ---------- Stage C: build context and stream the answer -----------
+        ctx_lines: list[str] = []
+        if snippets:
+            ctx_lines.append("=== Sources picked by retrieval planner ===")
+            ctx_lines.extend(snippets)
+            ctx_lines.append("")
+        if bfs_out:
+            ctx_lines.append("=== BFS context (from `graphify query`) ===")
+            ctx_lines.append(bfs_out.strip()[:2500])
+            ctx_lines.append("")
+        if bfs_snippets and not snippets:
+            ctx_lines.append("=== BFS source snippets (fallback) ===")
+            ctx_lines.extend(bfs_snippets)
+            ctx_lines.append("")
+        if report_excerpt:
+            ctx_lines.append("=== GRAPH_REPORT.md (excerpt) ===")
+            ctx_lines.append(report_excerpt[:1500])
+
+        context = "\n".join(ctx_lines).strip() or (
+            "(no graph context - the user has not built a graph yet)"
+        )
+
         system_prompt = (
-            "You answer questions about ONE specific code repository using "
-            "ONLY the context block below.\n\n"
-            "Rules you must follow:\n"
-            "1. If the answer is not directly supported by the context, "
-            "reply exactly: 'I don't know based on the graph.' Do not guess.\n"
-            "2. Cite every factual claim. After each claim, append "
-            "[node_id] using ids from the context (the labels in square "
-            "brackets after NODE).\n"
-            "3. Never invent file names, function names, or relations not "
-            "present in the context.\n"
-            "4. Be concise. Prefer 1-3 sentences plus a short bulleted list "
-            "if multiple items apply.\n"
-            "5. Do not summarize the rules back to the user."
+            "You answer questions about ONE specific code repository "
+            "using ONLY the context block below.\n\n"
+            "Rules:\n"
+            "1. If the answer isn't directly supported by the context, "
+            "reply exactly: 'I don't know based on the graph.' Do not "
+            "guess.\n"
+            "2. Cite every factual claim with [node_id] from the context.\n"
+            "3. Never invent file names, function names, or relations.\n"
+            "4. Be concise: 1-3 sentences plus a short bullet list if "
+            "multiple items apply.\n"
+            "5. Do not summarize these rules back to the user."
         )
         user_msg = f"Context:\n{context}\n\nQuestion: {question}"
 
         msgs: list[dict] = [{"role": "system", "content": system_prompt}]
-        # Trim conversation history to last 4 turns - long histories drift.
         for turn in self.chat_history[-4:]:
             msgs.append(turn)
         msgs.append({"role": "user", "content": user_msg})
@@ -851,8 +902,6 @@ class GraphifyApp:
             messages=msgs,
             stop_event=self.chat_stop_event,
             options={
-                # Low temperature for factual Q&A; bigger context window
-                # so source snippets fit alongside the BFS dump.
                 "temperature": 0.1,
                 "top_p": 0.9,
                 "num_ctx": 8192,
@@ -875,6 +924,211 @@ class GraphifyApp:
         if len(self.chat_history) > 8:
             self.chat_history = self.chat_history[-8:]
         self.root.after(0, lambda: self._chat_append("\n"))
+
+    # ------------------------------------------------------------- TOC + plan
+
+    def _build_graph_toc(
+        self, path: Path | None, max_per_community: int = 12
+    ) -> tuple[str, set[str]]:
+        """Produce a compact 'table of contents' of the loaded graph for the
+        planner. Returns (toc_text, set_of_valid_node_ids)."""
+        if not self.graph:
+            return "", set()
+        G = self.graph
+        # Group node ids by community.
+        by_comm: dict[int, list[str]] = {}
+        for nid, attrs in G.nodes(data=True):
+            c = int(attrs.get("community", 0) or 0)
+            by_comm.setdefault(c, []).append(nid)
+
+        lines: list[str] = []
+        valid: set[str] = set()
+        for c in sorted(by_comm):
+            members = by_comm[c]
+            # Top-N per community by degree.
+            members.sort(key=lambda n: -G.degree(n))
+            members = members[:max_per_community]
+            lines.append(f"-- community {c} ({len(by_comm[c])} nodes total) --")
+            for nid in members:
+                attrs = G.nodes[nid]
+                label = attrs.get("label", nid)
+                src = attrs.get("source_file", "")
+                deg = G.degree(nid)
+                lines.append(
+                    f"  {nid}  label={label!r}  src={src}  degree={deg}"
+                )
+                valid.add(nid)
+        return "\n".join(lines), valid
+
+    def _read_report_excerpt(self, path: Path | None, limit: int) -> str:
+        if not path:
+            return ""
+        report = path / "graphify-out" / "GRAPH_REPORT.md"
+        if not report.exists():
+            return ""
+        try:
+            return report.read_text(encoding="utf-8")[:limit]
+        except OSError:
+            return ""
+
+    def _plan_retrieval(
+        self,
+        model: str,
+        question: str,
+        toc: str,
+        report: str,
+        valid_ids: set[str],
+    ) -> list[str]:
+        """Single non-streaming LLM call that returns 3-6 node ids to read."""
+        plan_prompt = (
+            "You route questions to nodes in a code graph. Each TOC entry "
+            "looks like:\n"
+            "    <node_id>  label='<label>'  src=<file>  degree=<n>\n"
+            "Pick 3-6 node_ids whose source code most likely contains the "
+            "answer. Take the first whitespace-separated token on each "
+            "line - NOT the label, NOT the src.\n\n"
+            "Output ONLY a JSON object, no prose, no code fences:\n"
+            '{"nodes": ["node_id_1", "node_id_2", "node_id_3"]}\n\n'
+            "Example: if a TOC line is\n"
+            "    cluster_run_leiden  label='run_leiden'  src=cluster.py "
+            "degree=8\n"
+            "then a valid pick is \"cluster_run_leiden\"."
+        )
+        # Include last 2 turns so follow-ups stay on-topic.
+        history_lines: list[str] = []
+        for turn in self.chat_history[-4:]:
+            history_lines.append(f"{turn['role']}: {turn['content'][:300]}")
+        history_block = "\n".join(history_lines)
+
+        user_msg = (
+            f"Graph table of contents:\n{toc[:6000]}\n\n"
+            f"Graph summary:\n{report[:800]}\n\n"
+            f"Conversation so far:\n{history_block or '(none)'}\n\n"
+            f"Question: {question}"
+        )
+        msgs = [
+            {"role": "system", "content": plan_prompt},
+            {"role": "user", "content": user_msg},
+        ]
+        # Re-use stream_chat but collect to one string.
+        local_stop = threading.Event()
+        chunks: list[str] = []
+        for c in self.ollama.stream_chat(
+            model=model,
+            messages=msgs,
+            stop_event=local_stop,
+            options={"temperature": 0.0, "num_ctx": 8192},
+        ):
+            chunks.append(c)
+            if self.chat_stop_event.is_set():
+                local_stop.set()
+                break
+        raw = "".join(chunks).strip()
+        return self._parse_plan(raw, valid_ids)
+
+    def _parse_plan(self, raw: str, valid_ids: set[str]) -> list[str]:
+        """Extract a JSON list of node ids; tolerate fenced code or junk.
+
+        Falls back to fuzzy matching: if the model emits a label or src
+        path instead of the canonical node id, map it back."""
+        m = re.search(r"\{[^{}]*\"nodes\"[^{}]*\}", raw, re.DOTALL)
+        if not m:
+            return []
+        try:
+            obj = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            return []
+        candidates = obj.get("nodes") or []
+        if not isinstance(candidates, list):
+            return []
+
+        out: list[str] = []
+        seen: set[str] = set()
+        for x in candidates:
+            if not isinstance(x, str):
+                continue
+            mapped = self._match_to_node_id(x, valid_ids)
+            for nid in mapped:
+                if nid not in seen:
+                    seen.add(nid)
+                    out.append(nid)
+                if len(out) >= 6:
+                    return out
+        return out
+
+    def _match_to_node_id(self, x: str, valid_ids: set[str]) -> list[str]:
+        """Try exact id, then label, then source-file suffix match."""
+        if x in valid_ids:
+            return [x]
+        if not self.graph:
+            return []
+        # Label match (exact, case-insensitive).
+        x_low = x.lower()
+        by_label: list[str] = []
+        by_src: list[str] = []
+        # Normalise path separators so models that emit forward slashes
+        # match graph nodes whose src has backslashes (or vice versa).
+        x_norm = x.replace("\\", "/").lower()
+        for nid in valid_ids:
+            attrs = self.graph.nodes.get(nid, {})
+            label = str(attrs.get("label", "")).lower()
+            src = str(attrs.get("source_file", "")).replace("\\", "/").lower()
+            if label == x_low or label.rstrip("()") == x_low.rstrip("()"):
+                by_label.append(nid)
+            elif src and (src == x_norm or src.endswith("/" + x_norm) or x_norm.endswith("/" + src)):
+                by_src.append(nid)
+        # Prefer label matches; if none, fall back to src matches (cap to 2
+        # so a single "models.py" match doesn't dominate the picks).
+        return by_label[:2] if by_label else by_src[:2]
+
+    def _snippets_for_node_ids(
+        self, ids: list[str], path: Path | None
+    ) -> list[str]:
+        """Read source snippets for picked nodes + their direct neighbours."""
+        if not ids or not self.graph or not path:
+            return []
+        seen: set[tuple[str, int]] = set()
+        out: list[str] = []
+        # Include 1-hop neighbours so the model gets call/contains context.
+        widened: list[str] = list(ids)
+        for nid in ids:
+            for n in list(self.graph.neighbors(nid))[:3]:
+                if n not in widened:
+                    widened.append(n)
+                if len(widened) >= 14:
+                    break
+        for nid in widened:
+            attrs = self.graph.nodes.get(nid, {})
+            src = attrs.get("source_file", "")
+            loc = str(attrs.get("source_location", "")).lstrip("L")
+            if not src or not loc:
+                continue
+            try:
+                line_no = int(loc)
+            except ValueError:
+                continue
+            key = (src, line_no)
+            if key in seen:
+                continue
+            seen.add(key)
+            file_path = (path / src).resolve()
+            if not file_path.exists() or not file_path.is_file():
+                continue
+            try:
+                lines = file_path.read_text(
+                    encoding="utf-8", errors="replace"
+                ).splitlines()
+            except OSError:
+                continue
+            start = max(0, line_no - 3)
+            end = min(len(lines), line_no + 12)
+            snippet = "\n".join(
+                f"  {i + 1:4d}: {lines[i]}" for i in range(start, end)
+            )
+            out.append(f"-- [{nid}] {src} L{line_no} --\n{snippet}")
+            if len(out) >= 8:
+                break
+        return out
 
     # Pulls "[src=<file> loc=L<line>]" tuples out of `graphify query` output
     # and reads ~12 lines around each one. Capped at 6 snippets to keep the
@@ -1502,6 +1756,9 @@ class GraphifyApp:
         # 2. If a job is running, refresh the elapsed-time line.
         if self._job_start is not None:
             self._tick_timer()
+
+        # 3. Pick up any model-probe results posted by background threads.
+        self._drain_model_probe()
 
         self.root.after(80, self._poll_output)
 
