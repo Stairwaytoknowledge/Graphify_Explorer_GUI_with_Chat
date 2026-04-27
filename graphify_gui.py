@@ -1,7 +1,7 @@
-"""Graphify Explorer — a Tkinter GUI front-end for the `graphify` CLI.
+"""Tkinter GUI for the graphify CLI.
 
-Pick a folder, build a knowledge graph, see it rendered inline, click any node
-for its details, and ask questions of the graph from the side panel.
+Folder or git URL in, knowledge graph out. Click a node for its details,
+ask a question against a local Ollama model in the Chat tab.
 """
 
 from __future__ import annotations
@@ -111,11 +111,8 @@ def is_url(s: str) -> bool:
     return bool(URL_RE.match(s.strip()))
 
 
-# =================================================================== Ollama
-#
-# A tiny stdlib-only client for the locally-running Ollama daemon. Used by
-# the Chat tab. We deliberately do NOT add `ollama` or `requests` as a
-# Python dep — `urllib` is enough and keeps the wrapper light.
+# Stdlib HTTP client for a locally-running Ollama daemon (used by the Chat
+# tab). urllib is enough, no extra deps.
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 
@@ -145,7 +142,7 @@ class OllamaClient:
             name = m.get("name", "")
             if not name:
                 continue
-            # Filter out embedding-only models — they can't chat.
+            # Filter out embedding-only models - they can't chat.
             family = (m.get("details") or {}).get("family", "") or ""
             if "embed" in name.lower() or family in {"nomic-bert", "bge", "bert"}:
                 continue
@@ -651,7 +648,7 @@ class GraphifyApp:
         self.chat_stop_event = threading.Event()
         self.chat_thread: threading.Thread | None = None
 
-        # Initial model probe (runs in background — don't block UI startup).
+        # Initial model probe (runs in background - don't block UI startup).
         threading.Thread(target=self._refresh_models_async, daemon=True).start()
 
     # ---------------------------------------------------------- chat actions
@@ -680,7 +677,7 @@ class GraphifyApp:
                         models[0],
                     )
                     self.chat_model_var.set(preferred)
-                self.chat_status_var.set(f"connected — {len(models)} model(s) available")
+                self.chat_status_var.set(f"connected - {len(models)} model(s) available")
             else:
                 self.chat_status_var.set(
                     "Ollama is up but no chat models installed. "
@@ -767,14 +764,14 @@ class GraphifyApp:
                 except Exception:
                     pass
 
-        context = "\n".join(ctx_lines).strip() or "(no graph loaded — answer from general knowledge)"
+        context = "\n".join(ctx_lines).strip() or "(no graph loaded - answer from general knowledge)"
 
         system_prompt = (
             "You are a code-base analyst answering questions about a "
             "specific repository. Use ONLY the provided graph context to "
             "ground your answer. When you cite a node or file, name it "
             "explicitly. If the context does not contain the answer, say "
-            "so plainly — do not invent file or function names."
+            "so plainly - do not invent file or function names."
         )
         user_msg = f"Repository graph context:\n{context}\n\nQuestion: {question}"
 
@@ -863,7 +860,7 @@ class GraphifyApp:
             messagebox.showerror("Load failed", f"Could not parse graph.json:\n{exc}")
             return
         self.graph = G
-        # Default meta — _render_graph may overwrite this with a cap notice.
+        # Default meta - _render_graph may overwrite this with a cap notice.
         self.graph_meta_var.set(
             f"{G.number_of_nodes()} nodes · {G.number_of_edges()} edges · "
             f"loaded from {gp}"
@@ -871,7 +868,7 @@ class GraphifyApp:
         self._render_graph(G)
 
     # Cap the inline matplotlib viewer at this many nodes. Beyond this the
-    # layout solvers get slow and labels turn into mush — point users at the
+    # layout solvers get slow and labels turn into mush - point users at the
     # upstream vis.js HTML instead.
     MAX_INLINE_NODES = 300
 
@@ -900,13 +897,13 @@ class GraphifyApp:
             G = G.subgraph(keep).copy()
 
         # spring_layout is pure-Python (no scipy needed) and fine up to a
-        # few hundred nodes — which is what the cap above guarantees.
+        # few hundred nodes - which is what the cap above guarantees.
         pos = nx.spring_layout(G, seed=7, k=None, iterations=80)
 
         if capped:
             self.graph_meta_var.set(
                 f"{full_nodes} nodes · {full_edges} edges · "
-                f"showing top {G.number_of_nodes()} by degree — "
+                f"showing top {G.number_of_nodes()} by degree - "
                 f"click 'Open HTML' for the full visualization."
             )
 
@@ -919,7 +916,7 @@ class GraphifyApp:
                 color=PALETTE["edge"], linewidth=0.9, alpha=0.7, zorder=1,
             )
 
-        # nodes — colored by community when present
+        # nodes - colored by community when present
         keys = list(G.nodes())
         xs = [pos[k][0] for k in keys]
         ys = [pos[k][1] for k in keys]

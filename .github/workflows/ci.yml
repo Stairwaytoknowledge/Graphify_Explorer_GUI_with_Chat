@@ -27,7 +27,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v3
 
-      # Linux runners are headless and the GUI uses Tkinter — install
+      # Linux runners are headless and the GUI uses Tkinter - install
       # the system Tk libs and a virtual X server so we can prove the
       # window opens without a real display.
       - name: Install Tk + Xvfb (Linux)
