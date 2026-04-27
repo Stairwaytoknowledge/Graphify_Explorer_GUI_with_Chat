@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 import webbrowser
@@ -254,6 +255,10 @@ class GraphifyApp:
         self.node_artist = None
         self.node_keys: list[str] = []
         self.selected_node: str | None = None
+        # Job tracking for elapsed-time display + completion alerts.
+        self._job_start: float | None = None
+        self._job_label: str = ""
+        self._alert_on_done: bool = False
 
         self._build_widgets()
         self._poll_output()
@@ -1211,7 +1216,10 @@ class GraphifyApp:
 
         self._append(f"$ {' '.join(shlex.quote(c) for c in cmd)}\n", "cmd")
         self._append(f"  (cwd: {cwd})\n", "dim")
-        self._set_status("Cloning…" if not already else "Pulling latest…")
+        self._begin_job(
+            label="cloning" if not already else "pulling latest",
+            alert=False,
+        )
 
         # Stash the destination so the post-clone callback can chain `update`.
         self._post_clone_dest = dest
@@ -1364,7 +1372,6 @@ class GraphifyApp:
         cmd = [exe, *args]
         self._append(f"$ {' '.join(shlex.quote(c) for c in cmd)}\n", "cmd")
         self._append(f"  (cwd: {cwd})\n", "dim")
-        self._set_status("Running…")
         try:
             self.proc = subprocess.Popen(
                 cmd,
@@ -1378,6 +1385,7 @@ class GraphifyApp:
             self._append(f"[error] {exc}\n", "warn")
             self._set_status("Failed to start graphify.")
             return
+        self._begin_job(label=f"graphify {args[0] if args else ''}", alert=True)
         self._then_load = then_load
         threading.Thread(
             target=self._reader_thread, args=(self.proc,), daemon=True
@@ -1391,20 +1399,22 @@ class GraphifyApp:
         self.q.put(f"[exit {proc.returncode}]\n")
 
     def _poll_output(self) -> None:
+        # 1. Drain any subprocess output the reader thread parked.
         try:
             while True:
                 line = self.q.get_nowait()
                 if line.startswith("[exit "):
                     ok = "0]" in line
                     self._append(line, "ok" if ok else "warn")
-                    self._set_status("Done." if ok else "Finished with errors.")
+                    self._end_job(ok)
                     if ok and getattr(self, "_then_clone_chain", False):
-                        # git clone/pull succeeded → switch path_var to the
+                        # git clone/pull succeeded; switch path_var to the
                         # cloned dir and run `graphify update` on it.
                         self._then_clone_chain = False
                         dest = getattr(self, "_post_clone_dest", None)
                         if dest:
                             self.path_var.set(str(dest))
+                            self._maybe_link_output(dest)
                             self._run_graphify(
                                 ["update", str(dest)], cwd=dest, then_load=True
                             )
@@ -1415,7 +1425,69 @@ class GraphifyApp:
                     self._append(line)
         except queue.Empty:
             pass
+
+        # 2. If a job is running, refresh the elapsed-time line.
+        if self._job_start is not None:
+            self._tick_timer()
+
         self.root.after(80, self._poll_output)
+
+    # ----------------------------------------------------- job timer + alerts
+
+    def _begin_job(self, label: str, alert: bool) -> None:
+        self._job_start = time.monotonic()
+        self._job_label = label
+        self._alert_on_done = alert
+        self._tick_timer()
+
+    def _tick_timer(self) -> None:
+        if self._job_start is None:
+            return
+        elapsed = time.monotonic() - self._job_start
+        m, s = divmod(int(elapsed), 60)
+        self._set_status(
+            f"{self._job_label}... working - elapsed {m}:{s:02d}"
+        )
+
+    def _end_job(self, ok: bool) -> None:
+        if self._job_start is None:
+            self._set_status("Done." if ok else "Finished with errors.")
+            return
+        elapsed = time.monotonic() - self._job_start
+        m, s = divmod(int(elapsed), 60)
+        msg = (
+            f"Done in {m}:{s:02d}." if ok
+            else f"Finished with errors after {m}:{s:02d}."
+        )
+        self._set_status(msg)
+        self._job_start = None
+        if self._alert_on_done:
+            self._fire_alert(ok, m, s)
+        self._alert_on_done = False
+
+    def _fire_alert(self, ok: bool, m: int, s: int) -> None:
+        # Beep through the OS bell; ignored if unavailable.
+        try:
+            if os.name == "nt":
+                import winsound
+                winsound.MessageBeep(
+                    winsound.MB_OK if ok else winsound.MB_ICONHAND
+                )
+            else:
+                # Cross-platform terminal bell - works in most setups.
+                sys.stdout.write("\a")
+                sys.stdout.flush()
+        except Exception:
+            pass
+        # Bring the window forward briefly to draw attention.
+        try:
+            self.root.bell()
+            self.root.after(0, lambda: self.root.attributes("-topmost", True))
+            self.root.after(
+                400, lambda: self.root.attributes("-topmost", False)
+            )
+        except Exception:
+            pass
 
     # ---------------------------------------------------------- helpers
 
