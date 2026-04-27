@@ -1,204 +1,125 @@
 # Graphify Explorer
 
-A small, **100% self-contained**, **double-click-installable** GUI front-end
-for [**Graphify**](https://github.com/safishamsi/graphify) — the tool that
-turns any folder of code, docs, papers, images, or videos into a queryable
-knowledge graph.
+Desktop GUI around the [graphify](https://github.com/safishamsi/graphify) CLI.
+Point it at a local folder or a git URL and you get an interactive
+knowledge graph, a node-by-node detail view, and an optional chat tab
+backed by a local Ollama model.
 
-> **Credits / upstream:** all the heavy lifting is done by Graphify, by
-> [**Safi Shamsi (@safishamsi)**](https://github.com/safishamsi).
-> Repo: <https://github.com/safishamsi/graphify> · PyPI:
-> [`graphifyy`](https://pypi.org/project/graphifyy/).
-> This project is just a thin Tkinter wrapper + cross-platform installer
-> around the `graphify` CLI it ships. If you find it useful, please star
-> the upstream project.
+The graph engine, the extraction, the clustering, the query algorithm,
+the vis.js HTML and the GRAPH_REPORT format are all upstream's work
+([Safi Shamsi](https://github.com/safishamsi),
+[`graphifyy`](https://pypi.org/project/graphifyy/) on PyPI). What this
+repo adds is packaging, a desktop UI, and a local-LLM chat layer on top
+of it. See [`docs/COMPARISON.md`](docs/COMPARISON.md) for measured numbers.
 
 ![Icon](icon.png)
 
----
+## Install
 
-## What this gives you
+Pick the file for your OS and double-click it. Each one creates a
+`.venv` next to itself, installs `graphifyy` + `matplotlib` + `watchdog`,
+generates the icon, and registers a launcher.
 
-- **One double-click installer per OS** — Windows, macOS, Linux.
-- A **GUI with an icon** (no terminal needed once installed):
-  - **Embedded graph viewer** — the knowledge graph is rendered inline
-    (matplotlib + networkx) with community-coloured nodes, edge weights,
-    and zoom/pan via the matplotlib toolbar.
-  - **Click any node** to populate the right-hand details card: label,
-    type, source file/line, community, degree, neighbours and relations.
-  - **Side-by-side query panel** — Query / Explain / Path A|B run against
-    the loaded graph, with output streamed live below the details card.
-  - One-click **Open HTML** / **Open Report** to fall back to the upstream
-    vis.js HTML and `GRAPH_REPORT.md` when you want them.
-- A self-contained Python virtual environment in `.venv/` next to the
-  installer — nothing is installed system-wide.
-- Cross-platform GitHub Actions CI that **proves** the installer runs, the
-  GUI opens, and a real `graphify update` + `query` + `explain` round-trip
-  succeeds on Windows, macOS, and Linux.
+| OS      | File                  | What it produces                         |
+| ------- | --------------------- | ---------------------------------------- |
+| Windows | `Install-Windows.bat` | Desktop shortcut → `Graphify.vbs`        |
+| macOS   | `Install-macOS.command` | `Graphify Explorer.app` bundle         |
+| Linux   | `install-linux.sh`    | `~/.local/share/applications/*.desktop`  |
 
----
+Requirements:
+- Python 3.10+ *or* [`uv`](https://docs.astral.sh/uv/) on PATH.
+- `git` on PATH (only needed if you want to graph remote URLs).
+- Tkinter. On most distros it ships with Python; on Debian/Ubuntu install
+  `python3-tk` if missing.
 
-## Quick start
+## Use
 
-### Windows
+The input field accepts either:
 
-1. Make sure Python 3.10+ is installed (<https://www.python.org/downloads/>),
-   *or* install [`uv`](https://docs.astral.sh/uv/) — either is enough.
-2. **Double-click `Install-Windows.bat`.**
-3. The installer creates `.venv\`, installs `graphifyy`, generates `icon.ico`,
-   and drops a **"Graphify Explorer"** shortcut on your Desktop with the icon.
-4. Double-click that shortcut (or `Graphify.vbs` in this folder) to open the
-   GUI without a terminal window.
+- a local folder path (`C:\Code\my-project`, `/home/me/repo`)
+- a git URL (`https://github.com/<owner>/<repo>`,
+  `git@github.com:<owner>/<repo>.git`, `ssh://...`)
 
-### macOS
+For URLs the wrapper does a shallow `git clone` first, into
+`~/.graphify/repos/<owner>/<repo>/`. The graph artifacts land in
+`graphify-out/` next to the source. The full destination is logged in the
+Output tab before the clone starts, and the **Show in Files** button opens
+it in the OS file manager.
 
-1. Make sure Python 3.10+ is installed, *or* `uv`.
-2. **Double-click `Install-macOS.command`** (the first time, right-click →
-   *Open* to bypass Gatekeeper).
-3. The installer builds `Graphify Explorer.app` next to itself, with an `.icns`
-   icon. Double-click it like any other Mac app.
-4. A `Graphify.command` direct launcher is also produced.
+| Button                   | Runs                                          |
+| ------------------------ | --------------------------------------------- |
+| Build / Refresh Graph    | `git clone` (if URL) then `graphify update`   |
+| Watch                    | `graphify watch <folder>`                     |
+| Reload View              | Re-reads `graph.json` into the inline viewer  |
+| Open HTML                | Opens `graphify-out/graph.html` in a browser  |
+| Open Report              | Opens `graphify-out/GRAPH_REPORT.md`          |
+| Show in Files            | Opens the folder in Explorer/Finder/xdg-open  |
+| Query / Explain / Path   | `graphify query / explain / path`             |
 
-### Linux
+The right-hand pane is a notebook with three tabs:
 
-1. Install Python 3.10+, Tk and venv from your package manager:
+- **Details**: clicked-node label, source file, community, neighbours.
+- **Chat (local LLM)**: see below.
+- **Output**: streaming stdout/stderr from any subprocess the GUI spawned.
 
-   - Debian/Ubuntu: `sudo apt install python3 python3-tk python3-venv`
-   - Fedora/RHEL: `sudo dnf install python3 python3-tkinter`
-   - Arch: `sudo pacman -S python tk`
+### The chat tab
 
-2. Run `bash install-linux.sh` (or make it double-clickable in your file
-   manager). The installer registers a `Graphify Explorer` entry in your apps
-   menu and writes `Graphify.sh` / `Graphify.desktop` in this folder.
+If [Ollama](https://ollama.com) is running on `localhost:11434`, the chat
+tab discovers your installed models and lets you ask questions about the
+loaded repo. Each question runs `graphify query` first to pull a small
+BFS context out of the graph, then sends `{system, context, question}` to
+the local model. Answers stream back token-by-token.
 
----
+```
+ollama pull qwen2.5:7b      # or qwen3-coder:30b, llama3.2:3b, etc.
+```
 
-## Using the GUI
+If Ollama isn't running, the chat tab tells you so and the rest of the
+GUI works as before.
 
-| Control                     | What it runs (under the hood)                         |
-| --------------------------- | ------------------------------------------------------ |
-| **Browse…**                 | Pick the folder you want to analyze.                   |
-| **Build / Refresh Graph**   | `graphify update <folder>` (re-extracts code, no LLM)  |
-| **Watch (live rebuild)**    | `graphify watch <folder>` — rebuilds on every save     |
-| **Open Visualization**      | Opens `<folder>/graphify-out/graph.html`               |
-| **Open Report**             | Opens `<folder>/graphify-out/GRAPH_REPORT.md`          |
-| **Query** (with text)       | `graphify query "<text>"`                              |
-| **Explain** (with text)     | `graphify explain "<text>"`                            |
-| **Path Between (A\|B)**     | `graphify path "A" "B"` — type `A|B` in the box        |
-| **Stop**                    | Terminates the running graphify subprocess.            |
+The wrapper never bundles a model. Nothing is sent to a hosted API.
 
-> **Note on "deep" / multimodal mode:** the upstream `--mode deep` and
-> doc/paper/image semantic extraction live behind the `/graphify` slash
-> command in Claude Code (which is what calls Claude). The bare CLI used by
-> this GUI builds and queries the **code graph** locally without any API
-> key. For multimodal corpora, install Graphify as a Claude Code skill
-> (`graphify install` after `pip install graphifyy`) and use `/graphify`.
+## Graph rendering caveat
 
-Output (stdout + stderr) is streamed live into the bottom pane. The GUI never
-blocks: each command runs in a background thread.
-
-### Where outputs land
-
-Graphify writes everything into `<your-folder>/graphify-out/`:
-
-- `graph.html` — interactive vis.js visualization
-- `graph.json` — persistent graph (used for query/update across sessions)
-- `GRAPH_REPORT.md` — top concepts, communities, suggested questions
-- `obsidian/` — Obsidian vault (if produced by upstream)
-- `wiki/` — wiki articles (if produced by upstream)
-
----
-
-## API keys / model access
-
-Graphify uses Claude / GPT for semantic extraction on docs, images, and
-videos. The GUI passes your environment through to the subprocess unchanged,
-so set whatever Graphify needs **before** launching the GUI:
-
-- Windows (CMD): `setx ANTHROPIC_API_KEY "sk-ant-..."` then re-open the shortcut.
-- macOS / Linux: `export ANTHROPIC_API_KEY=sk-ant-...` in your shell rc.
-
-Pure-code repos can be analyzed locally with tree-sitter alone — no key needed.
-
----
+The inline matplotlib view is capped at 300 nodes (top-N by degree). For
+larger graphs, click **Open HTML** for the upstream vis.js view, which
+handles thousands of nodes well.
 
 ## Repo layout
 
 ```
-.
-├── graphify_gui.py        Tkinter GUI; calls the `graphify` CLI as a subprocess
-├── make_icon.py           Stdlib-only generator for icon.png + icon.ico
-├── icon.png / icon.ico    Generated icons (regenerated by the installers)
-├── requirements.txt       Pins `graphifyy` (the upstream PyPI package)
-│
-├── Install-Windows.bat    Double-click installer (Windows)
-├── Graphify.vbs           Silent (no console) GUI launcher
-├── Graphify.bat           Visible-console GUI launcher
-│
-├── Install-macOS.command  Double-click installer (macOS) — builds .app bundle
-│
-├── install-linux.sh       Installer for Linux — registers a .desktop entry
-│
-└── .github/workflows/ci.yml   Matrix CI: Windows + macOS + Linux × Py 3.11/3.12
+graphify_gui.py        Tkinter GUI; subprocesses graphify and Ollama
+make_icon.py           Generates icon.png and icon.ico (stdlib only)
+requirements.txt       graphifyy, matplotlib, watchdog
+Install-Windows.bat    Win installer + Desktop shortcut
+Graphify.vbs / .bat    Win launchers
+Install-macOS.command  macOS installer + .app bundle
+install-linux.sh       Linux installer + .desktop entry
+benchmarks/compare.py  Reproducible measurements (see COMPARISON.md)
+docs/COMPARISON.md     What's actually different vs upstream, with numbers
+.github/workflows/ci.yml  Win/macOS/Linux × Py 3.11/3.12 matrix
 ```
 
----
+## CI
 
-## How it works (one paragraph)
-
-`Install-*` scripts detect either [`uv`](https://docs.astral.sh/uv/) (preferred,
-faster) or `python -m venv` (fallback), build a `.venv` next to themselves,
-install `graphifyy` from PyPI, and generate icon assets. Each OS then gets
-the most native double-click experience that doesn't require code-signing:
-a Desktop `.lnk` with embedded `.ico` (Windows), a real `.app` bundle with
-`.icns` (macOS), and an `XDG` `.desktop` entry pointing at `icon.png` (Linux).
-The GUI itself is a single Tkinter file that shells out to the `graphify`
-binary inside `.venv`, streaming stdout into a scrollable pane.
-
----
-
-## CI / "provable in GitHub Actions"
-
-`.github/workflows/ci.yml` runs the **real installer** on each OS:
-
-- `ubuntu-latest`, `windows-latest`, `macos-latest`
-- Python 3.11 and 3.12
-
-For each combination it:
-
-1. Executes the OS-specific installer (`Install-Windows.bat`,
-   `Install-macOS.command`, or `install-linux.sh`).
-2. Verifies `icon.png` and `icon.ico` were generated.
-3. Verifies the `graphify` CLI is importable and the console script exists
-   inside `.venv`.
-4. Boots a headless Tk window (Xvfb on Linux) and instantiates `GraphifyApp`
-   to confirm the GUI actually constructs end-to-end.
-5. Uploads installer artefacts.
-
-That's the proof.
-
----
+`.github/workflows/ci.yml` runs the actual installer on each OS, builds
+a real graph from a small Python tree, and runs `query` + `explain`
+against it. Linux uses Xvfb to give Tkinter a display. The matrix is
+`{ubuntu-latest, windows-latest, macos-latest} × {3.11, 3.12}`.
 
 ## Uninstall
 
-There is nothing system-wide. Delete this folder and remove the entries the
-installer created:
+Nothing is installed system-wide. Delete this folder and remove:
 
 - Windows: `%USERPROFILE%\Desktop\Graphify Explorer.lnk`
-- macOS: drag `Graphify Explorer.app` to Trash.
-- Linux: `rm ~/.local/share/applications/graphify-explorer.desktop`
+- macOS: `Graphify Explorer.app`
+- Linux: `~/.local/share/applications/graphify-explorer.desktop`
+- Optional: `~/.graphify/repos/` (cloned source trees)
 
----
+## Credits
 
-## License & credits
-
-This wrapper is provided as-is (MIT). All credit for the underlying
-knowledge-graph engine — including the multimodal extractors, Leiden
-clustering, tree-sitter wiring, query interface, and visualization — belongs
-to **Safi Shamsi**:
-
-- GitHub: <https://github.com/safishamsi>
-- Project: <https://github.com/safishamsi/graphify>
+- Graphify: <https://github.com/safishamsi/graphify>
+- Author: <https://github.com/safishamsi>
 - PyPI: <https://pypi.org/project/graphifyy/>
 
-If you ship this further, keep these links visible.
+This wrapper is MIT.
