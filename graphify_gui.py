@@ -510,6 +510,21 @@ class GraphifyApp:
         toolbar.update()
         toolbar.pack(fill="x", padx=8, pady=(0, 6))
         self.canvas.mpl_connect("pick_event", self._on_pick)
+        # Mouse-wheel zoom centred on the cursor.
+        self.canvas.mpl_connect("scroll_event", self._on_scroll)
+        # Hover tooltip showing label / src / community.
+        self.canvas.mpl_connect("motion_notify_event", self._on_hover)
+        self._hover_annot = self.ax.annotate(
+            "", xy=(0, 0), xytext=(12, 12), textcoords="offset points",
+            color=PALETTE["fg"], fontsize=8,
+            bbox=dict(
+                boxstyle="round,pad=0.4",
+                fc=PALETTE["panel_alt"],
+                ec=PALETTE["accent"],
+                lw=0.8,
+            ),
+            visible=False, zorder=10,
+        )
 
     def _build_right_pane(self, parent: ttk.Frame) -> None:
         # Always-visible query row at the top.
@@ -1238,9 +1253,34 @@ class GraphifyApp:
     # upstream vis.js HTML instead.
     MAX_INLINE_NODES = 300
 
+    # Per-relation edge styling. Anything not in this map falls back to
+    # the default "edge" color and a solid line.
+    EDGE_STYLES = {
+        "calls":     {"color": "#5ac6ff", "linestyle": "-",  "alpha": 0.85},
+        "imports":   {"color": "#7c5cff", "linestyle": "--", "alpha": 0.75},
+        "contains":  {"color": "#9aa6b8", "linestyle": ":",  "alpha": 0.55},
+        "inherits":  {"color": "#5fd38f", "linestyle": "-",  "alpha": 0.85},
+        "references":{"color": "#ffb454", "linestyle": "-.", "alpha": 0.75},
+    }
+    EDGE_DEFAULT = {"color": "#33415a", "linestyle": "-", "alpha": 0.65}
+
     def _render_graph(self, G) -> None:
+        # Reset the axes but preserve our hover annotation handle.
         self.ax.clear()
         self._style_axes()
+        # Re-attach hover annotation (cleared by ax.clear()).
+        self._hover_annot = self.ax.annotate(
+            "", xy=(0, 0), xytext=(12, 12), textcoords="offset points",
+            color=PALETTE["fg"], fontsize=8,
+            bbox=dict(
+                boxstyle="round,pad=0.4",
+                fc=PALETTE["panel_alt"],
+                ec=PALETTE["accent"],
+                lw=0.8,
+            ),
+            visible=False, zorder=10,
+        )
+
         if G.number_of_nodes() == 0:
             self.ax.text(
                 0.5, 0.5, "Empty graph",
@@ -1250,20 +1290,15 @@ class GraphifyApp:
             self.canvas.draw_idle()
             return
 
-        # Big graph? Subsample to the top-N most-connected nodes.
         full_nodes = G.number_of_nodes()
         full_edges = G.number_of_edges()
         capped = False
         if full_nodes > self.MAX_INLINE_NODES:
             capped = True
-            # Keep the most central nodes plus their immediate neighbours,
-            # so the rendering still tells you *where the action is*.
             degrees = sorted(G.degree, key=lambda x: x[1], reverse=True)
             keep = {n for n, _ in degrees[: self.MAX_INLINE_NODES]}
             G = G.subgraph(keep).copy()
 
-        # spring_layout is pure-Python (no scipy needed) and fine up to a
-        # few hundred nodes - which is what the cap above guarantees.
         pos = nx.spring_layout(G, seed=7, k=None, iterations=80)
 
         if capped:
@@ -1273,34 +1308,67 @@ class GraphifyApp:
                 f"click 'Open HTML' for the full visualization."
             )
 
-        # edges
-        for u, v in G.edges():
-            x0, y0 = pos[u]
-            x1, y1 = pos[v]
-            self.ax.plot(
-                [x0, x1], [y0, y1],
-                color=PALETTE["edge"], linewidth=0.9, alpha=0.7, zorder=1,
-            )
+        # ---- Edges, grouped by relation so each style maps to one draw call.
+        edges_by_relation: dict[str, list[tuple]] = {}
+        for u, v, edata in G.edges(data=True):
+            rel = (edata or {}).get("relation", "default")
+            edges_by_relation.setdefault(rel, []).append((u, v))
 
-        # nodes - colored by community when present
+        legend_handles_edges: list = []
+        for rel, edge_list in edges_by_relation.items():
+            style = self.EDGE_STYLES.get(rel, self.EDGE_DEFAULT)
+            xs_e: list[float] = []
+            ys_e: list[float] = []
+            for u, v in edge_list:
+                x0, y0 = pos[u]
+                x1, y1 = pos[v]
+                xs_e += [x0, x1, None]
+                ys_e += [y0, y1, None]
+            line, = self.ax.plot(
+                xs_e, ys_e,
+                color=style["color"],
+                linestyle=style["linestyle"],
+                linewidth=0.95,
+                alpha=style["alpha"],
+                zorder=1,
+                label=rel if rel != "default" else "(other)",
+            )
+            legend_handles_edges.append(line)
+
+        # ---- Nodes coloured by community, sized by degree, bordered by
+        # whether they look like a "god node" (top 5% degree).
         keys = list(G.nodes())
         xs = [pos[k][0] for k in keys]
         ys = [pos[k][1] for k in keys]
-        colors = []
+        degs = [G.degree(k) for k in keys]
+        max_deg = max(degs) if degs else 1
+        deg_threshold = sorted(degs, reverse=True)[max(0, len(degs) // 20)] if degs else 0
+
+        colors: list[str] = []
+        edge_colors: list[str] = []
+        edge_widths: list[float] = []
+        comm_set: set[int] = set()
         for k in keys:
-            comm = G.nodes[k].get("community", 0)
-            colors.append(COMMUNITY_COLORS[int(comm) % len(COMMUNITY_COLORS)])
-        sizes = [120 + 40 * G.degree(k) for k in keys]
+            comm = int(G.nodes[k].get("community", 0) or 0)
+            comm_set.add(comm)
+            colors.append(COMMUNITY_COLORS[comm % len(COMMUNITY_COLORS)])
+            if G.degree(k) >= deg_threshold and deg_threshold > 0:
+                edge_colors.append(PALETTE["fg"])
+                edge_widths.append(1.4)
+            else:
+                edge_colors.append("#0b1220")
+                edge_widths.append(0.6)
+        sizes = [110 + 40 * d for d in degs]
         self.node_artist = self.ax.scatter(
             xs, ys,
             c=colors, s=sizes,
-            edgecolors="#0b1220", linewidths=0.8,
+            edgecolors=edge_colors, linewidths=edge_widths,
             picker=True, pickradius=8, zorder=3,
         )
         self.node_keys = keys
         self.node_positions = pos
 
-        # labels (cap to 60 to keep readable)
+        # ---- Labels (only when the cap is small enough to read)
         if len(keys) <= 60:
             for k in keys:
                 lbl = G.nodes[k].get("label", k)
@@ -1311,8 +1379,113 @@ class GraphifyApp:
                     fontsize=8, ha="center", va="bottom", zorder=4,
                 )
 
+        # ---- Legend: communities + edge types.
+        self._draw_legend(comm_set, list(edges_by_relation.keys()))
+
+        # ---- Cache axis limits so the zoom helper has a baseline to reset
+        # to, and stash the rendered subgraph for hover lookups.
         self.ax.margins(0.10)
+        self._home_xlim = self.ax.get_xlim()
+        self._home_ylim = self.ax.get_ylim()
+        self._render_G = G
         self.canvas.draw_idle()
+
+    def _draw_legend(self, comms: set[int], rels: list[str]) -> None:
+        """Two-section legend: community colors + edge relation styles."""
+        from matplotlib.lines import Line2D
+        from matplotlib.patches import Patch
+
+        handles: list = []
+        labels: list[str] = []
+        for c in sorted(comms)[:10]:
+            handles.append(
+                Patch(
+                    facecolor=COMMUNITY_COLORS[c % len(COMMUNITY_COLORS)],
+                    edgecolor="#0b1220",
+                )
+            )
+            labels.append(f"community {c}")
+        if len(comms) > 10:
+            handles.append(Patch(facecolor="none", edgecolor="none"))
+            labels.append(f"+{len(comms) - 10} more")
+        # blank row
+        if rels:
+            handles.append(Patch(facecolor="none", edgecolor="none"))
+            labels.append("")
+        for rel in rels:
+            style = self.EDGE_STYLES.get(rel, self.EDGE_DEFAULT)
+            handles.append(
+                Line2D(
+                    [0], [0],
+                    color=style["color"],
+                    linestyle=style["linestyle"],
+                    linewidth=2,
+                )
+            )
+            labels.append(rel if rel != "default" else "other")
+
+        leg = self.ax.legend(
+            handles, labels,
+            loc="upper right",
+            facecolor=PALETTE["panel_alt"],
+            edgecolor=PALETTE["panel_alt"],
+            labelcolor=PALETTE["fg"],
+            fontsize=8,
+            framealpha=0.9,
+            handlelength=1.8,
+        )
+        if leg:
+            for text in leg.get_texts():
+                text.set_color(PALETTE["fg"])
+
+    def _on_scroll(self, event) -> None:
+        """Zoom in/out on mouse wheel, centred on the cursor position."""
+        if event.inaxes != self.ax or event.xdata is None:
+            return
+        factor = 0.85 if event.button == "up" else 1.18
+        xlim = self.ax.get_xlim()
+        ylim = self.ax.get_ylim()
+        x, y = event.xdata, event.ydata
+        new_xlim = [x - (x - xlim[0]) * factor, x + (xlim[1] - x) * factor]
+        new_ylim = [y - (y - ylim[0]) * factor, y + (ylim[1] - y) * factor]
+        self.ax.set_xlim(new_xlim)
+        self.ax.set_ylim(new_ylim)
+        self.canvas.draw_idle()
+
+    def _on_hover(self, event) -> None:
+        """Show a tooltip with label / src / community / degree on hover."""
+        if not self.node_keys or self.node_artist is None:
+            return
+        if event.inaxes != self.ax:
+            if self._hover_annot.get_visible():
+                self._hover_annot.set_visible(False)
+                self.canvas.draw_idle()
+            return
+        cont, info = self.node_artist.contains(event)
+        if cont and "ind" in info and len(info["ind"]):
+            idx = int(info["ind"][0])
+            nid = self.node_keys[idx]
+            G = getattr(self, "_render_G", None) or self.graph
+            if G is None:
+                return
+            attrs = G.nodes.get(nid, {})
+            label = attrs.get("label", nid)
+            src = attrs.get("source_file", "?")
+            loc = attrs.get("source_location", "")
+            comm = attrs.get("community", "?")
+            text = (
+                f"{label}\n"
+                f"src: {src}{' ' + loc if loc else ''}\n"
+                f"community {comm} · degree {G.degree(nid)}"
+            )
+            x, y = self.node_positions[nid]
+            self._hover_annot.xy = (x, y)
+            self._hover_annot.set_text(text)
+            self._hover_annot.set_visible(True)
+            self.canvas.draw_idle()
+        elif self._hover_annot.get_visible():
+            self._hover_annot.set_visible(False)
+            self.canvas.draw_idle()
 
     def _on_pick(self, event) -> None:
         if not self.node_keys or event.artist is not self.node_artist:
