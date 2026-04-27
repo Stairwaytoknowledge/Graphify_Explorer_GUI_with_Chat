@@ -402,6 +402,9 @@ class GraphifyApp:
         ttk.Button(actions, text="Open Report", command=self._open_report).pack(
             side=LEFT, padx=4
         )
+        ttk.Button(actions, text="Show in Files", command=self._show_in_files).pack(
+            side=LEFT, padx=4
+        )
         ttk.Button(actions, text="Stop", command=self._stop).pack(side=RIGHT)
 
         # Main split (graph | details) -------------------------------------
@@ -1068,6 +1071,14 @@ class GraphifyApp:
         dest = derive_clone_dest(url)
         dest.parent.mkdir(parents=True, exist_ok=True)
 
+        # Make the destination visible up-front - users were missing where
+        # cloned repos and their graph output were landing.
+        self._switch_to_output_tab()
+        self._append(f"Cloning to: {dest}\n", "ok")
+        self._append(
+            f"Graph artifacts will land in: {dest / 'graphify-out'}\n", "dim"
+        )
+
         already = dest.exists() and (dest / ".git").exists()
         if already:
             cmd = ["git", "-C", str(dest), "pull", "--ff-only"]
@@ -1165,6 +1176,40 @@ class GraphifyApp:
             )
             return
         webbrowser.open(report.as_uri())
+
+    def _show_in_files(self) -> None:
+        """Open the current folder (and its graphify-out, if present) in the
+        OS file manager. Useful so users can see exactly where artifacts land."""
+        p = self.path_var.get().strip()
+        if not p:
+            messagebox.showwarning("No folder", "Pick a folder or paste a URL first.")
+            return
+        if is_url(p):
+            target = derive_clone_dest(p)
+        else:
+            target = Path(p).expanduser()
+        if not target.exists():
+            messagebox.showinfo(
+                "Not yet",
+                f"Folder doesn't exist yet:\n{target}\n\n"
+                f"It will be created on the next clone or build.",
+            )
+            return
+        try:
+            if os.name == "nt":
+                os.startfile(str(target))
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(target)])
+            else:
+                subprocess.Popen(["xdg-open", str(target)])
+        except Exception as exc:
+            messagebox.showerror("Failed", f"Could not open folder:\n{exc}")
+
+    def _switch_to_output_tab(self) -> None:
+        try:
+            self.notebook.select(2)  # Output tab
+        except Exception:
+            pass
 
     def _stop(self) -> None:
         if self.proc and self.proc.poll() is None:
