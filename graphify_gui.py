@@ -15,6 +15,8 @@ import shutil
 import subprocess
 import sys
 import threading
+import urllib.error
+import urllib.request
 import webbrowser
 from pathlib import Path
 from urllib.parse import urlparse
@@ -107,6 +109,91 @@ URL_RE = re.compile(r"^(https?://|git@|ssh://|git://)", re.IGNORECASE)
 
 def is_url(s: str) -> bool:
     return bool(URL_RE.match(s.strip()))
+
+
+# =================================================================== Ollama
+#
+# A tiny stdlib-only client for the locally-running Ollama daemon. Used by
+# the Chat tab. We deliberately do NOT add `ollama` or `requests` as a
+# Python dep — `urllib` is enough and keeps the wrapper light.
+
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+
+
+class OllamaClient:
+    def __init__(self, host: str = OLLAMA_HOST) -> None:
+        self.host = host.rstrip("/")
+
+    def is_up(self, timeout: float = 1.5) -> bool:
+        try:
+            with urllib.request.urlopen(f"{self.host}/api/tags", timeout=timeout):
+                return True
+        except Exception:
+            return False
+
+    def list_models(self, timeout: float = 3.0) -> list[str]:
+        """Return the names of installed chat-capable models."""
+        try:
+            with urllib.request.urlopen(
+                f"{self.host}/api/tags", timeout=timeout
+            ) as r:
+                data = json.load(r)
+        except Exception:
+            return []
+        names: list[str] = []
+        for m in data.get("models", []):
+            name = m.get("name", "")
+            if not name:
+                continue
+            # Filter out embedding-only models — they can't chat.
+            family = (m.get("details") or {}).get("family", "") or ""
+            if "embed" in name.lower() or family in {"nomic-bert", "bge", "bert"}:
+                continue
+            names.append(name)
+        return names
+
+    def stream_chat(
+        self,
+        model: str,
+        messages: list[dict],
+        stop_event: threading.Event,
+        options: dict | None = None,
+    ):
+        """Yield text chunks from /api/chat with stream=true."""
+        body = json.dumps(
+            {
+                "model": model,
+                "messages": messages,
+                "stream": True,
+                "options": options or {},
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.host}/api/chat",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=600) as resp:
+                for raw in resp:
+                    if stop_event.is_set():
+                        break
+                    if not raw.strip():
+                        continue
+                    try:
+                        chunk = json.loads(raw)
+                    except Exception:
+                        continue
+                    msg = chunk.get("message") or {}
+                    text = msg.get("content", "")
+                    if text:
+                        yield text
+                    if chunk.get("done"):
+                        break
+        except urllib.error.URLError as exc:
+            yield f"\n[error: {exc}]"
+        except Exception as exc:
+            yield f"\n[error: {exc}]"
 
 
 def derive_clone_dest(url: str) -> Path:
@@ -386,15 +473,54 @@ class GraphifyApp:
         self.canvas.mpl_connect("pick_event", self._on_pick)
 
     def _build_right_pane(self, parent: ttk.Frame) -> None:
-        # Selected-node card
-        card = ttk.Frame(parent, style="Panel.TFrame")
-        card.pack(fill="x", padx=10, pady=(10, 6))
-        ttk.Label(card, text="Selected node", style="Title.TLabel").pack(
+        # Always-visible query row at the top.
+        qf = ttk.Frame(parent, style="Panel.TFrame")
+        qf.pack(fill="x", padx=10, pady=(10, 6))
+        ttk.Label(qf, text="Ask the graph", style="Title.TLabel").pack(
             anchor="w", padx=4
         )
+        ttk.Entry(qf, textvariable=self.query_var).pack(
+            fill="x", padx=4, pady=(4, 6)
+        )
+        btnrow = ttk.Frame(qf, style="Panel.TFrame")
+        btnrow.pack(fill="x", padx=4)
+        ttk.Button(
+            btnrow, text="Query", style="Accent.TButton", command=self._query
+        ).pack(side=LEFT, padx=(0, 6))
+        ttk.Button(btnrow, text="Explain", command=self._explain).pack(
+            side=LEFT, padx=4
+        )
+        ttk.Button(btnrow, text="Path A|B", command=self._path_between).pack(
+            side=LEFT, padx=4
+        )
+        ttk.Button(
+            btnrow,
+            text="Use selected",
+            command=self._fill_query_with_selected,
+        ).pack(side=RIGHT)
+
+        # Tabbed area: Details / Chat / Output
+        nb = ttk.Notebook(parent)
+        nb.pack(fill=BOTH, expand=True, padx=10, pady=(4, 10))
+        self.notebook = nb
+
+        details_tab = ttk.Frame(nb, style="Panel.TFrame")
+        chat_tab = ttk.Frame(nb, style="Panel.TFrame")
+        output_tab = ttk.Frame(nb, style="Panel.TFrame")
+        nb.add(details_tab, text="Details")
+        nb.add(chat_tab, text="Chat (local LLM)")
+        nb.add(output_tab, text="Output")
+
+        self._build_details_tab(details_tab)
+        self._build_chat_tab(chat_tab)
+        self._build_output_tab(output_tab)
+
+    def _build_details_tab(self, parent: ttk.Frame) -> None:
+        ttk.Label(parent, text="Selected node", style="Title.TLabel").pack(
+            anchor="w", padx=10, pady=(10, 4)
+        )
         self.detail_text = Text(
-            card,
-            height=8,
+            parent,
             wrap="word",
             background=PALETTE["panel_alt"],
             foreground=PALETTE["fg"],
@@ -404,43 +530,12 @@ class GraphifyApp:
             padx=10,
             pady=8,
         )
-        self.detail_text.pack(fill="x", padx=4, pady=4)
+        self.detail_text.pack(fill=BOTH, expand=True, padx=10, pady=(0, 10))
         self._set_detail_placeholder()
 
-        # Query row
-        qf = ttk.Frame(parent, style="Panel.TFrame")
-        qf.pack(fill="x", padx=10, pady=(4, 6))
-        ttk.Label(qf, text="Ask the graph", style="Title.TLabel").pack(
-            anchor="w", padx=4
-        )
-        ttk.Entry(qf, textvariable=self.query_var).pack(
-            fill="x", padx=4, pady=(4, 6)
-        )
-        btnrow = ttk.Frame(qf, style="Panel.TFrame")
-        btnrow.pack(fill="x", padx=4)
-        ttk.Button(btnrow, text="Query", style="Accent.TButton", command=self._query).pack(
-            side=LEFT, padx=(0, 6)
-        )
-        ttk.Button(btnrow, text="Explain", command=self._explain).pack(
-            side=LEFT, padx=4
-        )
-        ttk.Button(
-            btnrow, text="Path A|B", command=self._path_between
-        ).pack(side=LEFT, padx=4)
-        ttk.Button(
-            btnrow,
-            text="Use selected",
-            command=self._fill_query_with_selected,
-        ).pack(side=RIGHT)
-
-        # Output / explanation pane
-        out = ttk.Frame(parent, style="Panel.TFrame")
-        out.pack(fill=BOTH, expand=True, padx=10, pady=(4, 10))
-        ttk.Label(out, text="Output", style="Title.TLabel").pack(
-            anchor="w", padx=4
-        )
-        text_frame = ttk.Frame(out, style="Panel.TFrame")
-        text_frame.pack(fill=BOTH, expand=True, padx=4, pady=4)
+    def _build_output_tab(self, parent: ttk.Frame) -> None:
+        text_frame = ttk.Frame(parent, style="Panel.TFrame")
+        text_frame.pack(fill=BOTH, expand=True, padx=10, pady=10)
         self.output = Text(
             text_frame,
             wrap="word",
@@ -459,13 +554,278 @@ class GraphifyApp:
         self.output.configure(yscrollcommand=scroll.set)
         scroll.pack(side=RIGHT, fill="y")
         self.output.pack(side=LEFT, fill=BOTH, expand=True)
-
         self.output.tag_configure("dim", foreground=PALETTE["fg_dim"])
         self.output.tag_configure("ok", foreground=PALETTE["ok"])
         self.output.tag_configure("warn", foreground=PALETTE["warn"])
         self.output.tag_configure(
             "cmd", foreground=PALETTE["accent"], font=self._mono_font
         )
+
+    # ------------------------------------------------------------ chat tab
+
+    def _build_chat_tab(self, parent: ttk.Frame) -> None:
+        # Header with model picker
+        header = ttk.Frame(parent, style="Panel.TFrame")
+        header.pack(fill="x", padx=10, pady=(10, 6))
+        ttk.Label(header, text="Local LLM (Ollama)", style="Title.TLabel").pack(
+            side=LEFT
+        )
+        self.chat_status_var = StringVar(value="checking…")
+        ttk.Label(
+            header, textvariable=self.chat_status_var, style="Dim.TLabel"
+        ).pack(side=LEFT, padx=10)
+
+        picker = ttk.Frame(parent, style="Panel.TFrame")
+        picker.pack(fill="x", padx=10, pady=(0, 6))
+        ttk.Label(picker, text="Model:", style="Dim.TLabel").pack(
+            side=LEFT, padx=(0, 6)
+        )
+        self.chat_model_var = StringVar()
+        self.chat_model_combo = ttk.Combobox(
+            picker,
+            textvariable=self.chat_model_var,
+            state="readonly",
+            width=30,
+        )
+        self.chat_model_combo.pack(side=LEFT, fill="x", expand=True)
+        ttk.Button(
+            picker, text="Refresh", command=self._refresh_models
+        ).pack(side=LEFT, padx=4)
+
+        # Conversation transcript
+        body = ttk.Frame(parent, style="Panel.TFrame")
+        body.pack(fill=BOTH, expand=True, padx=10, pady=(0, 6))
+        self.chat_text = Text(
+            body,
+            wrap="word",
+            background=PALETTE["panel_alt"],
+            foreground=PALETTE["fg"],
+            insertbackground=PALETTE["fg"],
+            relief="flat",
+            borderwidth=0,
+            padx=10,
+            pady=8,
+        )
+        scroll = ttk.Scrollbar(body, orient="vertical", command=self.chat_text.yview)
+        self.chat_text.configure(yscrollcommand=scroll.set)
+        scroll.pack(side=RIGHT, fill="y")
+        self.chat_text.pack(side=LEFT, fill=BOTH, expand=True)
+        self.chat_text.tag_configure(
+            "user", foreground=PALETTE["accent"], font=(self._mono_font[0], 10, "bold")
+        )
+        self.chat_text.tag_configure(
+            "assistant", foreground=PALETTE["fg"]
+        )
+        self.chat_text.tag_configure(
+            "system", foreground=PALETTE["fg_dim"]
+        )
+        self.chat_text.tag_configure(
+            "citation", foreground=PALETTE["accent2"]
+        )
+        self.chat_text.configure(state=DISABLED)
+
+        # Input row
+        inp = ttk.Frame(parent, style="Panel.TFrame")
+        inp.pack(fill="x", padx=10, pady=(0, 10))
+        self.chat_input_var = StringVar()
+        self.chat_entry = ttk.Entry(inp, textvariable=self.chat_input_var)
+        self.chat_entry.pack(side=LEFT, fill="x", expand=True, padx=(0, 6))
+        self.chat_entry.bind("<Return>", lambda e: self._chat_send())
+        self.chat_send_btn = ttk.Button(
+            inp, text="Send", style="Accent.TButton", command=self._chat_send
+        )
+        self.chat_send_btn.pack(side=LEFT)
+        ttk.Button(inp, text="Stop", command=self._chat_stop).pack(
+            side=LEFT, padx=4
+        )
+        ttk.Button(inp, text="Clear", command=self._chat_clear).pack(
+            side=LEFT, padx=4
+        )
+
+        # State
+        self.ollama = OllamaClient()
+        self.chat_history: list[dict] = []
+        self.chat_stop_event = threading.Event()
+        self.chat_thread: threading.Thread | None = None
+
+        # Initial model probe (runs in background — don't block UI startup).
+        threading.Thread(target=self._refresh_models_async, daemon=True).start()
+
+    # ---------------------------------------------------------- chat actions
+
+    def _refresh_models(self) -> None:
+        threading.Thread(target=self._refresh_models_async, daemon=True).start()
+
+    def _refresh_models_async(self) -> None:
+        if not self.ollama.is_up():
+            self.root.after(
+                0,
+                lambda: self.chat_status_var.set(
+                    "Ollama not running on localhost:11434. "
+                    "Install from https://ollama.com and `ollama pull qwen2.5:7b`."
+                ),
+            )
+            return
+        models = self.ollama.list_models()
+        def apply():
+            if models:
+                self.chat_model_combo["values"] = models
+                if not self.chat_model_var.get() or self.chat_model_var.get() not in models:
+                    # Prefer a code-focused model if present.
+                    preferred = next(
+                        (m for m in models if "coder" in m.lower() or "code" in m.lower()),
+                        models[0],
+                    )
+                    self.chat_model_var.set(preferred)
+                self.chat_status_var.set(f"connected — {len(models)} model(s) available")
+            else:
+                self.chat_status_var.set(
+                    "Ollama is up but no chat models installed. "
+                    "Try `ollama pull qwen2.5:7b`."
+                )
+        self.root.after(0, apply)
+
+    def _chat_clear(self) -> None:
+        self.chat_history = []
+        self.chat_text.configure(state=NORMAL)
+        self.chat_text.delete("1.0", END)
+        self.chat_text.configure(state=DISABLED)
+
+    def _chat_stop(self) -> None:
+        self.chat_stop_event.set()
+
+    def _chat_append(self, text: str, tag: str | None = None) -> None:
+        self.chat_text.configure(state=NORMAL)
+        if tag:
+            self.chat_text.insert(END, text, tag)
+        else:
+            self.chat_text.insert(END, text)
+        self.chat_text.see(END)
+        self.chat_text.configure(state=DISABLED)
+
+    def _chat_send(self) -> None:
+        if self.chat_thread and self.chat_thread.is_alive():
+            messagebox.showinfo(
+                "Busy", "An answer is still streaming. Click Stop first."
+            )
+            return
+        question = self.chat_input_var.get().strip()
+        if not question:
+            return
+        model = self.chat_model_var.get().strip()
+        if not model:
+            messagebox.showerror(
+                "No model",
+                "No Ollama model selected. Click Refresh, or run "
+                "`ollama pull qwen2.5:7b`.",
+            )
+            return
+
+        # Render the user turn.
+        self._chat_append(f"\nYou: ", "user")
+        self._chat_append(f"{question}\n")
+        self.chat_input_var.set("")
+
+        self.chat_stop_event = threading.Event()
+        self.chat_thread = threading.Thread(
+            target=self._chat_worker,
+            args=(question, model),
+            daemon=True,
+        )
+        self.chat_thread.start()
+
+    def _chat_worker(self, question: str, model: str) -> None:
+        # 1. Build grounding context from the graph.
+        ctx_lines: list[str] = []
+        path = None
+        try:
+            p = self.path_var.get().strip()
+            if p and not is_url(p):
+                path = Path(p).expanduser()
+        except Exception:
+            pass
+
+        graph_query_out = self._run_graphify_capture(
+            ["query", question, "--budget", "1500"], cwd=path
+        )
+        if graph_query_out:
+            ctx_lines.append("=== Graph BFS context (from `graphify query`) ===")
+            ctx_lines.append(graph_query_out.strip()[:4000])
+            ctx_lines.append("")
+
+        # Plus a slice of the GRAPH_REPORT.md for high-level concepts.
+        if path:
+            report = path / "graphify-out" / "GRAPH_REPORT.md"
+            if report.exists():
+                try:
+                    text = report.read_text(encoding="utf-8")
+                    ctx_lines.append("=== GRAPH_REPORT.md (excerpt) ===")
+                    ctx_lines.append(text[:2500])
+                except Exception:
+                    pass
+
+        context = "\n".join(ctx_lines).strip() or "(no graph loaded — answer from general knowledge)"
+
+        system_prompt = (
+            "You are a code-base analyst answering questions about a "
+            "specific repository. Use ONLY the provided graph context to "
+            "ground your answer. When you cite a node or file, name it "
+            "explicitly. If the context does not contain the answer, say "
+            "so plainly — do not invent file or function names."
+        )
+        user_msg = f"Repository graph context:\n{context}\n\nQuestion: {question}"
+
+        # Track conversation: keep prior turns, but always re-inject the
+        # context as the latest user message so the model stays grounded.
+        msgs: list[dict] = [{"role": "system", "content": system_prompt}]
+        for turn in self.chat_history:
+            msgs.append(turn)
+        msgs.append({"role": "user", "content": user_msg})
+
+        # 2. Open the assistant turn in the transcript.
+        self.root.after(0, lambda: self._chat_append("\nAssistant: ", "user"))
+
+        full_reply: list[str] = []
+        for chunk in self.ollama.stream_chat(
+            model=model,
+            messages=msgs,
+            stop_event=self.chat_stop_event,
+        ):
+            full_reply.append(chunk)
+            self.root.after(0, lambda c=chunk: self._chat_append(c, "assistant"))
+            if self.chat_stop_event.is_set():
+                break
+
+        if not full_reply:
+            self.root.after(
+                0, lambda: self._chat_append("(no response)\n", "system")
+            )
+
+        # 3. Trim history (keep last 6 turns to stay under context window).
+        self.chat_history.append({"role": "user", "content": question})
+        self.chat_history.append({"role": "assistant", "content": "".join(full_reply)})
+        if len(self.chat_history) > 12:
+            self.chat_history = self.chat_history[-12:]
+        self.root.after(0, lambda: self._chat_append("\n"))
+
+    def _run_graphify_capture(
+        self, args: list[str], cwd: Path | None, timeout: float = 30.0
+    ) -> str:
+        """Synchronously run a graphify subcommand and return stdout."""
+        exe = graphify_executable()
+        if not exe or not cwd or not cwd.exists():
+            return ""
+        try:
+            r = subprocess.run(
+                [exe, *args],
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            return r.stdout or ""
+        except Exception:
+            return ""
 
     # ---------------------------------------------------------- graph drawing
 
