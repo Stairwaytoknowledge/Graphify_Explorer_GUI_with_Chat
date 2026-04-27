@@ -105,10 +105,25 @@ def graphify_executable() -> str | None:
 
 # Detect whether the user typed a URL vs a local path.
 URL_RE = re.compile(r"^(https?://|git@|ssh://|git://)", re.IGNORECASE)
+# SCP-style git URL: user@host:path/to/repo(.git)?  (no scheme prefix)
+SCP_RE = re.compile(r"^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+:[^\\]+", re.IGNORECASE)
 
 
 def is_url(s: str) -> bool:
-    return bool(URL_RE.match(s.strip()))
+    s = s.strip()
+    return bool(URL_RE.match(s) or SCP_RE.match(s))
+
+
+def looks_like_network_path(s: str) -> bool:
+    """UNC, mapped network drive, or common SMB/NFS mount points."""
+    s = s.strip()
+    if s.startswith("\\\\") or s.startswith("//"):
+        return True  # Windows UNC or POSIX-style network share
+    if sys.platform == "darwin" and s.startswith("/Volumes/"):
+        return True
+    if sys.platform.startswith("linux") and s.startswith(("/mnt/", "/media/")):
+        return True
+    return False
 
 
 # Stdlib HTTP client for a locally-running Ollama daemon (used by the Chat
@@ -1034,10 +1049,24 @@ class GraphifyApp:
                 )
             return None
         path = Path(p).expanduser()
+        # If the user pointed at the .git directory itself, walk up to the
+        # repo root - graphify needs the working tree, not the metadata.
+        if path.name == ".git" and path.is_dir():
+            parent = path.parent
+            if not silent:
+                self._set_status(f"Using repo root {parent} instead of its .git/")
+            self.path_var.set(str(parent))
+            path = parent
         if not path.exists():
             if not silent:
                 messagebox.showerror("Missing", f"Path does not exist:\n{path}")
             return None
+        # Network-mounted paths work but warn about implications.
+        if looks_like_network_path(str(path)):
+            self._set_status(
+                f"Network path detected ({path}); scans will be slower and "
+                "graphify-out/ writes back to the share."
+            )
         return path
 
     def _update_graph(self) -> None:
