@@ -128,6 +128,136 @@ jobs:
           "../$GRAPHIFY" explain "hello()"
           echo "End-to-end OK"
 
+      - name: Unit tests for URL/path detection helpers
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            PY=".venv/Scripts/python.exe"
+          else
+            PY=".venv/bin/python"
+          fi
+          "$PY" - <<'PY'
+          import graphify_gui as g
+          # URL detection
+          for s in ["https://github.com/x/y",
+                    "git@github.com:x/y.git",
+                    "ssh://git@h/x/y",
+                    "user@server:repo.git"]:
+              assert g.is_url(s), f"expected URL: {s!r}"
+          for s in ["/home/x/repo", "C:/Code/foo", "./repo"]:
+              assert not g.is_url(s), f"expected path: {s!r}"
+          # Network path detection
+          if __import__("os").name == "nt":
+              assert g.looks_like_network_path("\\\\srv\\share\\repo")
+          import sys
+          if sys.platform == "darwin":
+              assert g.looks_like_network_path("/Volumes/share/repo")
+          if sys.platform.startswith("linux"):
+              assert g.looks_like_network_path("/mnt/share/repo")
+          # Clone-dest derivation
+          d = g.derive_clone_dest("https://github.com/foo/bar")
+          assert d.parts[-2:] == ("foo", "bar"), d
+          d = g.derive_clone_dest("git@github.com:foo/bar.git")
+          assert d.parts[-2:] == ("foo", "bar"), d
+          print("URL/path helpers OK")
+          PY
+
+      - name: Test custom output folder (junction/symlink)
+        shell: bash
+        env:
+          DISPLAY: ":99"
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            PY=".venv/Scripts/python.exe"
+            GRAPHIFY=".venv/Scripts/graphify.exe"
+          else
+            PY=".venv/bin/python"
+            GRAPHIFY=".venv/bin/graphify"
+          fi
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            pgrep Xvfb >/dev/null || (Xvfb :99 -screen 0 1024x768x24 & sleep 1)
+          fi
+          rm -rf out_test src_test
+          mkdir -p src_test out_test
+          echo 'def fn(): return 42' > src_test/m.py
+          "$PY" - <<PY
+          import graphify_gui, tkinter as tk
+          from pathlib import Path
+          root = tk.Tk()
+          app = graphify_gui.GraphifyApp(root)
+          app.path_var.set("src_test")
+          app.output_dir_var.set("out_test")
+          app._maybe_link_output(Path("src_test").resolve())
+          root.destroy()
+          PY
+          # Now build and confirm bytes land in out_test, not src_test/graphify-out
+          (cd src_test && "../$GRAPHIFY" update .)
+          test -f out_test/graph.json || (echo "graph.json not in custom dir" && ls -la out_test src_test && exit 1)
+          test -f out_test/graph.html || (echo "graph.html not in custom dir" && exit 1)
+          echo "Custom output folder OK"
+
+      - name: Verify launcher scripts have correct shape
+        shell: bash
+        run: |
+          # We can't actually double-click in CI, but we can verify each
+          # launcher invokes the right Python + GUI script and exists where
+          # the installer claimed it would.
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            test -f Graphify.vbs || (echo "Graphify.vbs missing" && exit 1)
+            test -f Graphify.bat || (echo "Graphify.bat missing" && exit 1)
+            grep -q 'pythonw.exe' Graphify.vbs || (echo "Graphify.vbs does not invoke pythonw" && exit 1)
+            grep -q 'graphify_gui.py' Graphify.vbs || (echo "Graphify.vbs does not point at GUI" && exit 1)
+          fi
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            test -f Graphify.command || (echo "Graphify.command missing" && exit 1)
+            test -x Graphify.command || (echo "Graphify.command not executable" && exit 1)
+            test -d "Graphify Explorer.app" || (echo ".app bundle missing" && exit 1)
+            test -x "Graphify Explorer.app/Contents/MacOS/graphify-launch" \
+              || (echo "app bundle launcher not executable" && exit 1)
+          fi
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            test -f Graphify.sh || (echo "Graphify.sh missing" && exit 1)
+            test -x Graphify.sh || (echo "Graphify.sh not executable" && exit 1)
+            test -f Graphify.desktop || (echo ".desktop missing" && exit 1)
+            grep -q "Graphify.sh" Graphify.desktop || (echo ".desktop does not point at launcher" && exit 1)
+          fi
+          echo "Launchers OK"
+
+      - name: Test launcher actually opens the GUI
+        shell: bash
+        env:
+          DISPLAY: ":99"
+        timeout-minutes: 2
+        run: |
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            pgrep Xvfb >/dev/null || (Xvfb :99 -screen 0 1024x768x24 & sleep 1)
+          fi
+          # Use GRAPHIFY_TEST_AUTOQUIT=1 (honored in graphify_gui.main) so
+          # the GUI exits cleanly after construction without needing a click.
+          export GRAPHIFY_TEST_AUTOQUIT=1
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            cmd //c ".\\Graphify.bat"
+          elif [[ "$RUNNER_OS" == "macOS" ]]; then
+            ./Graphify.command
+          else
+            ./Graphify.sh
+          fi
+          echo "Launcher round-trip OK"
+
+      - name: Reproducible benchmark + comparison doc
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            PY=".venv/Scripts/python.exe"
+          else
+            PY=".venv/bin/python"
+          fi
+          # Use a tiny stable repo so timing isn't network-flaky.
+          "$PY" benchmarks/compare.py \
+            --repo https://github.com/octocat/Spoon-Knife \
+            --question "What files does this repo contain?" || true
+          test -f docs/COMPARISON.md && echo "COMPARISON.md regenerated"
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4

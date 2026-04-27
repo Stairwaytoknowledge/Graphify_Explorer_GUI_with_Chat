@@ -1579,6 +1579,9 @@ class GraphifyApp:
 def main() -> int:
     root = Tk()
     GraphifyApp(root)
+    # Honored by CI: open the window, schedule destruction, exit cleanly.
+    if os.environ.get("GRAPHIFY_TEST_AUTOQUIT"):
+        root.after(800, root.destroy)
     root.mainloop()
     return 0
 
