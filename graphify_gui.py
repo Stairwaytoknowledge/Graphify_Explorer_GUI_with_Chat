@@ -244,6 +244,7 @@ class GraphifyApp:
         self._apply_theme()
 
         self.path_var = StringVar(value=str(Path.home()))
+        self.output_dir_var = StringVar()  # empty = default <source>/graphify-out
         self.query_var = StringVar()
         self.status_var = StringVar(value="Ready.")
         self.proc: subprocess.Popen | None = None
@@ -385,9 +386,9 @@ class GraphifyApp:
     # ---------------------------------------------------------- widgets
 
     def _build_widgets(self) -> None:
-        # Top bar -----------------------------------------------------------
+        # Top bar - input
         top = ttk.Frame(self.root)
-        top.pack(side="top", fill="x", padx=12, pady=(12, 6))
+        top.pack(side="top", fill="x", padx=12, pady=(12, 4))
 
         ttk.Label(top, text="Folder or URL", style="Dim.TLabel").pack(
             side=LEFT, padx=(0, 6)
@@ -395,6 +396,24 @@ class GraphifyApp:
         entry = ttk.Entry(top, textvariable=self.path_var)
         entry.pack(side=LEFT, fill="x", expand=True, padx=(0, 6))
         ttk.Button(top, text="Browse…", command=self._browse).pack(side=LEFT)
+
+        # Optional: custom output directory (junction/symlink to graphify-out).
+        out_row = ttk.Frame(self.root)
+        out_row.pack(side="top", fill="x", padx=12, pady=(0, 4))
+        ttk.Label(
+            out_row,
+            text="Output (optional)",
+            style="Dim.TLabel",
+        ).pack(side=LEFT, padx=(0, 6))
+        ttk.Entry(out_row, textvariable=self.output_dir_var).pack(
+            side=LEFT, fill="x", expand=True, padx=(0, 6)
+        )
+        ttk.Button(out_row, text="Browse…", command=self._browse_output).pack(
+            side=LEFT
+        )
+        ttk.Button(out_row, text="Clear", command=lambda: self.output_dir_var.set("")).pack(
+            side=LEFT, padx=4
+        )
 
         actions = ttk.Frame(self.root)
         actions.pack(side="top", fill="x", padx=12, pady=(0, 8))
@@ -1035,6 +1054,14 @@ class GraphifyApp:
             # Try auto-loading any existing graph for this folder.
             self._load_graph_into_view()
 
+    def _browse_output(self) -> None:
+        chosen = filedialog.askdirectory(
+            title="Pick a custom output directory",
+            initialdir=self.output_dir_var.get() or str(Path.home()),
+        )
+        if chosen:
+            self.output_dir_var.set(chosen)
+
     def _selected_path(self, silent: bool = False) -> Path | None:
         p = self.path_var.get().strip()
         if not p:
@@ -1080,7 +1107,73 @@ class GraphifyApp:
         path = self._selected_path()
         if not path:
             return
+        self._maybe_link_output(path)
         self._run_graphify(["update", str(path)], cwd=path, then_load=True)
+
+    def _maybe_link_output(self, source: Path) -> None:
+        """If the user picked a custom output directory, make graphify's
+        hardcoded `<source>/graphify-out` point at it via a junction (Windows)
+        or symlink (Unix). This is transparent to graphify."""
+        custom = self.output_dir_var.get().strip()
+        if not custom:
+            return
+        custom_path = Path(custom).expanduser().resolve()
+        custom_path.mkdir(parents=True, exist_ok=True)
+        link = (source / "graphify-out").resolve(strict=False)
+
+        # If a real graphify-out already exists (not a link), bail rather
+        # than risk losing files. The user should remove or move it first.
+        if link.exists() and not link.is_symlink():
+            try:
+                # Junctions on Windows pass is_dir() but also is_junction() is
+                # only available in 3.12+. Use a heuristic via os.readlink
+                # falling back to an existence check.
+                target_of = os.readlink(str(link)) if hasattr(os, "readlink") else None
+            except OSError:
+                target_of = None
+            if not target_of:
+                self._append(
+                    f"warn: {link} is a real directory, leaving it alone "
+                    "(remove it first if you want to use a custom output dir).\n",
+                    "warn",
+                )
+                return
+
+        # Replace any existing link.
+        if link.exists() or link.is_symlink():
+            try:
+                if os.name == "nt":
+                    # Junctions are removed via rmdir, symlinks via unlink.
+                    if link.is_symlink():
+                        link.unlink()
+                    else:
+                        os.rmdir(str(link))
+                else:
+                    link.unlink()
+            except OSError as exc:
+                self._append(f"warn: could not remove old link {link}: {exc}\n", "warn")
+                return
+
+        try:
+            if os.name == "nt":
+                # mklink /J makes a directory junction without admin.
+                r = subprocess.run(
+                    ["cmd", "/c", "mklink", "/J", str(link), str(custom_path)],
+                    capture_output=True, text=True,
+                )
+                if r.returncode != 0:
+                    raise OSError(r.stderr.strip() or "mklink failed")
+            else:
+                os.symlink(str(custom_path), str(link), target_is_directory=True)
+            self._append(
+                f"output: {link} -> {custom_path}\n", "ok"
+            )
+        except OSError as exc:
+            self._append(
+                f"warn: could not link {link} -> {custom_path}: {exc}\n"
+                "Falling back to default location.\n",
+                "warn",
+            )
 
     def _clone_then_graph(self, url: str) -> None:
         """Clone (or pull) <url> into ~/.graphify/repos/..., then build the graph."""
