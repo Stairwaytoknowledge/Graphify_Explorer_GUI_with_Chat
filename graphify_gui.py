@@ -774,9 +774,7 @@ class GraphifyApp:
         self.chat_thread.start()
 
     def _chat_worker(self, question: str, model: str) -> None:
-        # 1. Build grounding context from the graph.
-        ctx_lines: list[str] = []
-        path = None
+        path: Path | None = None
         try:
             p = self.path_var.get().strip()
             if p and not is_url(p):
@@ -784,44 +782,67 @@ class GraphifyApp:
         except Exception:
             pass
 
+        # 1. Pull a BFS slice of the graph for the question.
         graph_query_out = self._run_graphify_capture(
             ["query", question, "--budget", "1500"], cwd=path
         )
-        if graph_query_out:
-            ctx_lines.append("=== Graph BFS context (from `graphify query`) ===")
-            ctx_lines.append(graph_query_out.strip()[:4000])
-            ctx_lines.append("")
 
-        # Plus a slice of the GRAPH_REPORT.md for high-level concepts.
+        # 2. For every node mentioned in that BFS output, pull its source
+        #    snippet so the model has actual code to reason about, not just
+        #    labels. This is the single biggest hallucination reducer.
+        source_snippets = self._collect_source_snippets(graph_query_out, path)
+
+        ctx_lines: list[str] = []
+        if graph_query_out:
+            ctx_lines.append("=== Graph BFS (from `graphify query`) ===")
+            ctx_lines.append(graph_query_out.strip()[:3500])
+            ctx_lines.append("")
+        if source_snippets:
+            ctx_lines.append("=== Source snippets for cited nodes ===")
+            ctx_lines.extend(source_snippets)
+            ctx_lines.append("")
         if path:
             report = path / "graphify-out" / "GRAPH_REPORT.md"
             if report.exists():
                 try:
                     text = report.read_text(encoding="utf-8")
                     ctx_lines.append("=== GRAPH_REPORT.md (excerpt) ===")
-                    ctx_lines.append(text[:2500])
+                    ctx_lines.append(text[:2000])
                 except Exception:
                     pass
 
-        context = "\n".join(ctx_lines).strip() or "(no graph loaded - answer from general knowledge)"
+        context = "\n".join(ctx_lines).strip()
+        if not context:
+            context = (
+                "(no graph context available - the user has not built a "
+                "graph for the current folder yet)"
+            )
 
+        # 3. Strict system prompt: refusal-by-default, citation format,
+        #    no implementation guesses without source.
         system_prompt = (
-            "You are a code-base analyst answering questions about a "
-            "specific repository. Use ONLY the provided graph context to "
-            "ground your answer. When you cite a node or file, name it "
-            "explicitly. If the context does not contain the answer, say "
-            "so plainly - do not invent file or function names."
+            "You answer questions about ONE specific code repository using "
+            "ONLY the context block below.\n\n"
+            "Rules you must follow:\n"
+            "1. If the answer is not directly supported by the context, "
+            "reply exactly: 'I don't know based on the graph.' Do not guess.\n"
+            "2. Cite every factual claim. After each claim, append "
+            "[node_id] using ids from the context (the labels in square "
+            "brackets after NODE).\n"
+            "3. Never invent file names, function names, or relations not "
+            "present in the context.\n"
+            "4. Be concise. Prefer 1-3 sentences plus a short bulleted list "
+            "if multiple items apply.\n"
+            "5. Do not summarize the rules back to the user."
         )
-        user_msg = f"Repository graph context:\n{context}\n\nQuestion: {question}"
+        user_msg = f"Context:\n{context}\n\nQuestion: {question}"
 
-        # Track conversation: keep prior turns, but always re-inject the
-        # context as the latest user message so the model stays grounded.
         msgs: list[dict] = [{"role": "system", "content": system_prompt}]
-        for turn in self.chat_history:
+        # Trim conversation history to last 4 turns - long histories drift.
+        for turn in self.chat_history[-4:]:
             msgs.append(turn)
         msgs.append({"role": "user", "content": user_msg})
 
-        # 2. Open the assistant turn in the transcript.
         self.root.after(0, lambda: self._chat_append("\nAssistant: ", "user"))
 
         full_reply: list[str] = []
@@ -829,6 +850,13 @@ class GraphifyApp:
             model=model,
             messages=msgs,
             stop_event=self.chat_stop_event,
+            options={
+                # Low temperature for factual Q&A; bigger context window
+                # so source snippets fit alongside the BFS dump.
+                "temperature": 0.1,
+                "top_p": 0.9,
+                "num_ctx": 8192,
+            },
         ):
             full_reply.append(chunk)
             self.root.after(0, lambda c=chunk: self._chat_append(c, "assistant"))
@@ -840,12 +868,57 @@ class GraphifyApp:
                 0, lambda: self._chat_append("(no response)\n", "system")
             )
 
-        # 3. Trim history (keep last 6 turns to stay under context window).
         self.chat_history.append({"role": "user", "content": question})
-        self.chat_history.append({"role": "assistant", "content": "".join(full_reply)})
-        if len(self.chat_history) > 12:
-            self.chat_history = self.chat_history[-12:]
+        self.chat_history.append(
+            {"role": "assistant", "content": "".join(full_reply)}
+        )
+        if len(self.chat_history) > 8:
+            self.chat_history = self.chat_history[-8:]
         self.root.after(0, lambda: self._chat_append("\n"))
+
+    # Pulls "[src=<file> loc=L<line>]" tuples out of `graphify query` output
+    # and reads ~12 lines around each one. Capped at 6 snippets to keep the
+    # prompt lean.
+    _NODE_LINE_RE = re.compile(
+        r"NODE\s+(.+?)\s+\[src=(?P<src>[^\s]+)\s+loc=(?P<loc>L?\d+)"
+    )
+
+    def _collect_source_snippets(
+        self, query_out: str, path: Path | None
+    ) -> list[str]:
+        if not query_out or not path:
+            return []
+        seen: set[tuple[str, str]] = set()
+        out: list[str] = []
+        for m in self._NODE_LINE_RE.finditer(query_out):
+            src = m.group("src")
+            loc = m.group("loc").lstrip("L")
+            key = (src, loc)
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                line_no = int(loc)
+            except ValueError:
+                continue
+            file_path = (path / src).resolve()
+            if not file_path.exists() or not file_path.is_file():
+                continue
+            try:
+                lines = file_path.read_text(
+                    encoding="utf-8", errors="replace"
+                ).splitlines()
+            except OSError:
+                continue
+            start = max(0, line_no - 3)
+            end = min(len(lines), line_no + 10)
+            snippet = "\n".join(
+                f"  {i + 1:4d}: {lines[i]}" for i in range(start, end)
+            )
+            out.append(f"-- {src} L{line_no} --\n{snippet}")
+            if len(out) >= 6:
+                break
+        return out
 
     def _run_graphify_capture(
         self, args: list[str], cwd: Path | None, timeout: float = 30.0
