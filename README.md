@@ -34,17 +34,36 @@ Requirements:
 
 ## Use
 
-The input field accepts either:
+The input field accepts:
 
 - a local folder path (`C:\Code\my-project`, `/home/me/repo`)
-- a git URL (`https://github.com/<owner>/<repo>`,
-  `git@github.com:<owner>/<repo>.git`, `ssh://...`)
+- a git URL: `https://github.com/<owner>/<repo>`,
+  `git@github.com:<owner>/<repo>.git`, `ssh://...`, `git://...`,
+  or SCP-style `user@host:/path/to/repo.git`
+- a network path: Windows UNC (`\\server\share\repo`), mapped drives
+  (`Z:\repo`), macOS SMB mounts (`/Volumes/...`), Linux NFS/SMB mounts
+  (`/mnt/...`, `/media/...`). Network paths produce a status-bar warning
+  about slower scans and write-back to the share.
 
-For URLs the wrapper does a shallow `git clone` first, into
-`~/.graphify/repos/<owner>/<repo>/`. The graph artifacts land in
+For URLs the wrapper does a shallow `git clone` first into
+`~/.graphify/repos/<owner>/<repo>/`. By default graph artifacts land in
 `graphify-out/` next to the source. The full destination is logged in the
-Output tab before the clone starts, and the **Show in Files** button opens
-it in the OS file manager.
+Output tab before the clone starts, and **Show in Files** opens it.
+
+If you point at a `.git/` directory by accident the wrapper redirects to
+the repo root.
+
+### Custom output directory
+
+The **Output (optional)** field above the action buttons takes any
+directory you want. When set, the wrapper transparently redirects
+graphify's hardcoded `<source>/graphify-out` to your chosen location via:
+
+- a directory junction on Windows (`mklink /J`, no admin needed)
+- a symlink on macOS / Linux (`os.symlink`)
+
+Bytes physically land in your chosen folder; graphify never knows the
+difference. Leave the field empty to keep the default behaviour.
 
 | Button                   | Runs                                          |
 | ------------------------ | --------------------------------------------- |
@@ -66,18 +85,40 @@ The right-hand pane is a notebook with three tabs:
 
 If [Ollama](https://ollama.com) is running on `localhost:11434`, the chat
 tab discovers your installed models and lets you ask questions about the
-loaded repo. Each question runs `graphify query` first to pull a small
-BFS context out of the graph, then sends `{system, context, question}` to
-the local model. Answers stream back token-by-token.
+loaded repo.
 
 ```
 ollama pull qwen2.5:7b      # or qwen3-coder:30b, llama3.2:3b, etc.
 ```
 
-If Ollama isn't running, the chat tab tells you so and the rest of the
-GUI works as before.
+How a question is grounded:
 
-The wrapper never bundles a model. Nothing is sent to a hosted API.
+1. Run `graphify query` to pull the BFS slice of the graph relevant to
+   the question.
+2. For every node mentioned in that slice, read 12 lines of actual
+   source from the file/line recorded in the graph (capped at 6
+   snippets).
+3. Append a slice of `GRAPH_REPORT.md` for high-level concepts.
+4. Send the bundle to the local model with `temperature=0.1`, a strict
+   system prompt that demands `[node_id]` citations, and a refusal
+   instruction: if the answer is not in the context, the model is told
+   to reply "I don't know based on the graph."
+
+Trade-off: lower hallucination, but answers are bounded by what
+graphify's BFS surfaced. For better recall, increase the `--budget`
+default in `graphify query` or run an explicit `Explain` first on a
+seed node.
+
+If Ollama isn't running, the chat tab tells you so and the rest of the
+GUI works as before. Nothing is sent to a hosted API; nothing leaves the
+machine.
+
+### Progress and completion
+
+While a build, clone, or query is running, the status bar shows
+`graphify update... working - elapsed M:SS`. On exit it shows
+`Done in M:SS` and fires a system beep + brings the window to the front
+so you don't have to keep watching.
 
 ## Graph rendering caveat
 
@@ -103,9 +144,29 @@ docs/COMPARISON.md     What's actually different vs upstream, with numbers
 ## CI
 
 `.github/workflows/ci.yml` runs the actual installer on each OS, builds
-a real graph from a small Python tree, and runs `query` + `explain`
-against it. Linux uses Xvfb to give Tkinter a display. The matrix is
+a real graph, and exercises every behaviour the README claims. Matrix:
 `{ubuntu-latest, windows-latest, macos-latest} × {3.11, 3.12}`.
+
+For each cell it:
+
+1. Runs the OS-specific installer end-to-end.
+2. Verifies icons, the `graphify` CLI, and the GUI Tk window construct.
+3. Runs `graphify update / query / explain` on a small Python tree.
+4. Runs unit asserts on `is_url`, `looks_like_network_path`, and
+   `derive_clone_dest`.
+5. Sets a custom output directory, builds a graph, asserts the bytes
+   landed in the custom dir (proves the junction/symlink redirect).
+6. Verifies each launcher (`Graphify.bat`, `Graphify.command`,
+   `Graphify.sh`, the macOS `.app` bundle, the Linux `.desktop` entry)
+   exists and points at the right Python.
+7. Invokes the launcher with `GRAPHIFY_TEST_AUTOQUIT=1` so it opens the
+   GUI, waits 800 ms, and exits. The launcher round-trip returning 0 is
+   the "double-click works" proof.
+8. Re-runs `benchmarks/compare.py` so `docs/COMPARISON.md` stays in
+   sync with the wrapper's behaviour.
+
+Linux uses Xvfb for the headless display. macOS uses its real Aqua
+session. Windows uses the real Tk that ships with Python.
 
 ## Uninstall
 
