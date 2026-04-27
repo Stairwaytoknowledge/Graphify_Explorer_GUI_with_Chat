@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import shlex
 import shutil
 import subprocess
@@ -16,6 +17,7 @@ import sys
 import threading
 import webbrowser
 from pathlib import Path
+from urllib.parse import urlparse
 from tkinter import (
     BOTH,
     DISABLED,
@@ -97,6 +99,37 @@ def graphify_executable() -> str | None:
         if c.exists():
             return str(c)
     return shutil.which("graphify")
+
+
+# Detect whether the user typed a URL vs a local path.
+URL_RE = re.compile(r"^(https?://|git@|ssh://|git://)", re.IGNORECASE)
+
+
+def is_url(s: str) -> bool:
+    return bool(URL_RE.match(s.strip()))
+
+
+def derive_clone_dest(url: str) -> Path:
+    """Pick a deterministic local clone directory for a given git URL.
+
+    Mirrors graphify's own ~/.graphify/repos/<owner>/<repo> convention so
+    repeat clones land in the same place.
+    """
+    home = Path.home() / ".graphify" / "repos"
+    if url.startswith("git@"):
+        m = re.match(r"git@([^:]+):([^/]+)/(.+?)(?:\.git)?$", url)
+        if m:
+            _, owner, repo = m.groups()
+            return home / owner / repo
+    parsed = urlparse(url)
+    parts = [p for p in parsed.path.split("/") if p]
+    if len(parts) >= 2:
+        owner = parts[-2]
+        repo = parts[-1]
+        if repo.endswith(".git"):
+            repo = repo[:-4]
+        return home / owner / repo
+    return home / "unknown" / (parsed.netloc or "repo")
 
 
 # =============================================================== app
@@ -257,7 +290,9 @@ class GraphifyApp:
         top = ttk.Frame(self.root)
         top.pack(side="top", fill="x", padx=12, pady=(12, 6))
 
-        ttk.Label(top, text="Folder", style="Dim.TLabel").pack(side=LEFT, padx=(0, 6))
+        ttk.Label(top, text="Folder or URL", style="Dim.TLabel").pack(
+            side=LEFT, padx=(0, 6)
+        )
         entry = ttk.Entry(top, textvariable=self.path_var)
         entry.pack(side=LEFT, fill="x", expand=True, padx=(0, 6))
         ttk.Button(top, text="Browse…", command=self._browse).pack(side=LEFT)
@@ -465,11 +500,17 @@ class GraphifyApp:
             messagebox.showerror("Load failed", f"Could not parse graph.json:\n{exc}")
             return
         self.graph = G
-        self._render_graph(G)
+        # Default meta — _render_graph may overwrite this with a cap notice.
         self.graph_meta_var.set(
             f"{G.number_of_nodes()} nodes · {G.number_of_edges()} edges · "
             f"loaded from {gp}"
         )
+        self._render_graph(G)
+
+    # Cap the inline matplotlib viewer at this many nodes. Beyond this the
+    # layout solvers get slow and labels turn into mush — point users at the
+    # upstream vis.js HTML instead.
+    MAX_INLINE_NODES = 300
 
     def _render_graph(self, G) -> None:
         self.ax.clear()
@@ -483,11 +524,28 @@ class GraphifyApp:
             self.canvas.draw_idle()
             return
 
-        seed = 7
-        if G.number_of_nodes() <= 200:
-            pos = nx.spring_layout(G, seed=seed, k=None)
-        else:
-            pos = nx.kamada_kawai_layout(G)
+        # Big graph? Subsample to the top-N most-connected nodes.
+        full_nodes = G.number_of_nodes()
+        full_edges = G.number_of_edges()
+        capped = False
+        if full_nodes > self.MAX_INLINE_NODES:
+            capped = True
+            # Keep the most central nodes plus their immediate neighbours,
+            # so the rendering still tells you *where the action is*.
+            degrees = sorted(G.degree, key=lambda x: x[1], reverse=True)
+            keep = {n for n, _ in degrees[: self.MAX_INLINE_NODES]}
+            G = G.subgraph(keep).copy()
+
+        # spring_layout is pure-Python (no scipy needed) and fine up to a
+        # few hundred nodes — which is what the cap above guarantees.
+        pos = nx.spring_layout(G, seed=7, k=None, iterations=80)
+
+        if capped:
+            self.graph_meta_var.set(
+                f"{full_nodes} nodes · {full_edges} edges · "
+                f"showing top {G.number_of_nodes()} by degree — "
+                f"click 'Open HTML' for the full visualization."
+            )
 
         # edges
         for u, v in G.edges():
@@ -606,7 +664,14 @@ class GraphifyApp:
         p = self.path_var.get().strip()
         if not p:
             if not silent:
-                messagebox.showwarning("No folder", "Pick a folder first.")
+                messagebox.showwarning("No input", "Pick a folder or paste a git URL.")
+            return None
+        if is_url(p):
+            if not silent:
+                messagebox.showinfo(
+                    "URL detected",
+                    "That's a git URL. Click Build / Refresh to clone and graph it.",
+                )
             return None
         path = Path(p).expanduser()
         if not path.exists():
@@ -616,10 +681,68 @@ class GraphifyApp:
         return path
 
     def _update_graph(self) -> None:
+        target = self.path_var.get().strip()
+        if not target:
+            messagebox.showwarning("No input", "Pick a folder or paste a git URL.")
+            return
+        if is_url(target):
+            self._clone_then_graph(target)
+            return
         path = self._selected_path()
         if not path:
             return
         self._run_graphify(["update", str(path)], cwd=path, then_load=True)
+
+    def _clone_then_graph(self, url: str) -> None:
+        """Clone (or pull) <url> into ~/.graphify/repos/..., then build the graph."""
+        if self.proc and self.proc.poll() is None:
+            messagebox.showinfo("Busy", "A graphify command is already running.")
+            return
+        if not shutil.which("git"):
+            messagebox.showerror(
+                "git not found",
+                "`git` is required to clone remote repos.\n"
+                "Install Git from https://git-scm.com/downloads and try again.",
+            )
+            return
+        dest = derive_clone_dest(url)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+
+        already = dest.exists() and (dest / ".git").exists()
+        if already:
+            cmd = ["git", "-C", str(dest), "pull", "--ff-only"]
+            cwd = dest
+        else:
+            # Clean up partial clones from previous failed attempts.
+            if dest.exists() and not (dest / ".git").exists():
+                shutil.rmtree(dest, ignore_errors=True)
+            cmd = ["git", "clone", "--depth", "1", url, str(dest)]
+            cwd = dest.parent
+
+        self._append(f"$ {' '.join(shlex.quote(c) for c in cmd)}\n", "cmd")
+        self._append(f"  (cwd: {cwd})\n", "dim")
+        self._set_status("Cloning…" if not already else "Pulling latest…")
+
+        # Stash the destination so the post-clone callback can chain `update`.
+        self._post_clone_dest = dest
+        try:
+            self.proc = subprocess.Popen(
+                cmd,
+                cwd=str(cwd),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+        except Exception as exc:
+            self._append(f"[error] {exc}\n", "warn")
+            self._set_status("Failed to start git.")
+            return
+        self._then_load = False
+        self._then_clone_chain = True
+        threading.Thread(
+            target=self._reader_thread, args=(self.proc,), daemon=True
+        ).start()
 
     def _watch(self) -> None:
         path = self._selected_path()
@@ -748,11 +871,22 @@ class GraphifyApp:
             while True:
                 line = self.q.get_nowait()
                 if line.startswith("[exit "):
-                    self._append(line, "ok" if "0]" in line else "warn")
-                    self._set_status("Done." if "0]" in line else "Finished with errors.")
-                    if getattr(self, "_then_load", False) and "0]" in line:
-                        self._load_graph_into_view()
+                    ok = "0]" in line
+                    self._append(line, "ok" if ok else "warn")
+                    self._set_status("Done." if ok else "Finished with errors.")
+                    if ok and getattr(self, "_then_clone_chain", False):
+                        # git clone/pull succeeded → switch path_var to the
+                        # cloned dir and run `graphify update` on it.
+                        self._then_clone_chain = False
+                        dest = getattr(self, "_post_clone_dest", None)
+                        if dest:
+                            self.path_var.set(str(dest))
+                            self._run_graphify(
+                                ["update", str(dest)], cwd=dest, then_load=True
+                            )
+                    elif ok and getattr(self, "_then_load", False):
                         self._then_load = False
+                        self._load_graph_into_view()
                 else:
                     self._append(line)
         except queue.Empty:
