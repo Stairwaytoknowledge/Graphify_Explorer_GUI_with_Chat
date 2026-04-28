@@ -194,22 +194,36 @@ def run_fast_mode(
 def run_quality_mode(
     app, model: str, repo: Path, question: str
 ) -> tuple[str, float, list[str]]:
-    """Two-stage planner + drill + answer."""
+    """Two-stage planner + drill + answer, with BFS-pick union (matches
+    the GUI's _chat_worker behaviour)."""
     bfs_out = graph_query(repo, question)
+    bfs_picks = app._node_ids_from_bfs(bfs_out)
+
     toc, valid = app._build_graph_toc(repo)
     rep = app._read_report_excerpt(repo, 1500)
     t_plan = time.perf_counter()
-    picked = app._plan_retrieval(
+    planner_picks = app._plan_retrieval(
         model=model, question=question, toc=toc,
         report=rep, valid_ids=valid,
     )
     plan_secs = time.perf_counter() - t_plan
+
+    # Union: planner picks first, then BFS picks (dedup, cap 10).
+    seen: set[str] = set()
+    picked: list[str] = []
+    for nid in (*planner_picks, *bfs_picks):
+        if nid not in seen:
+            seen.add(nid)
+            picked.append(nid)
+        if len(picked) >= 10:
+            break
+
     snippets = app._snippets_for_node_ids(picked, repo)
     bfs_snippets = app._collect_source_snippets(bfs_out, repo)
 
     ctx_lines: list[str] = []
     if snippets:
-        ctx_lines.append("=== Picked node sources ===")
+        ctx_lines.append("=== Picked node sources (planner ∪ BFS) ===")
         ctx_lines.extend(snippets)
     if bfs_out:
         ctx_lines.append("=== BFS context ===")

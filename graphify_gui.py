@@ -654,14 +654,16 @@ class GraphifyApp:
         ttk.Label(mode_row, text="Retrieval:", style="Dim.TLabel").pack(
             side=LEFT, padx=(0, 6)
         )
-        self.chat_mode_var = StringVar(value="quality")
+        # Default Fast: empirically better refusal/must-hit on the eval
+        # set than Quality at the time of writing (see docs/CHAT_EVAL.md).
+        self.chat_mode_var = StringVar(value="fast")
         ttk.Radiobutton(
-            mode_row, text="Quality (planner + drill)",
-            variable=self.chat_mode_var, value="quality",
+            mode_row, text="Fast (BFS + snippets)",
+            variable=self.chat_mode_var, value="fast",
         ).pack(side=LEFT, padx=4)
         ttk.Radiobutton(
-            mode_row, text="Fast (BFS only)",
-            variable=self.chat_mode_var, value="fast",
+            mode_row, text="Quality (planner ∪ BFS)",
+            variable=self.chat_mode_var, value="quality",
         ).pack(side=LEFT, padx=4)
 
         # Conversation transcript
@@ -844,11 +846,18 @@ class GraphifyApp:
         mode = self.chat_mode_var.get()
         report_excerpt = self._read_report_excerpt(path, limit=1500)
 
-        picked: list[str] = []
+        # BFS slice always runs - it's primary in fast mode and a guaranteed
+        # baseline in quality mode (so quality is never worse than fast).
+        bfs_out = self._run_graphify_capture(
+            ["query", question, "--budget", "1200"], cwd=path
+        )
+        bfs_picks = self._node_ids_from_bfs(bfs_out)
+
+        planner_picks: list[str] = []
         if mode == "quality":
             toc, all_ids = self._build_graph_toc(path)
             if toc and all_ids:
-                picked = self._plan_retrieval(
+                planner_picks = self._plan_retrieval(
                     model=model,
                     question=question,
                     toc=toc,
@@ -856,27 +865,39 @@ class GraphifyApp:
                     valid_ids=all_ids,
                 )
 
-        # BFS slice always runs - it's the backstop in quality mode and the
-        # primary source in fast mode.
-        bfs_out = self._run_graphify_capture(
-            ["query", question, "--budget", "1200"], cwd=path
-        )
+        # In quality mode: union planner ∪ BFS so we get the planner's
+        # semantic picks plus the BFS keyword picks. In fast mode: BFS only.
+        if mode == "quality":
+            seen: set[str] = set()
+            picked: list[str] = []
+            for nid in (*planner_picks, *bfs_picks):
+                if nid not in seen:
+                    seen.add(nid)
+                    picked.append(nid)
+                if len(picked) >= 10:
+                    break
+        else:
+            picked = bfs_picks[:10]
 
         snippets = self._snippets_for_node_ids(picked, path) if picked else []
         bfs_snippets = self._collect_source_snippets(bfs_out, path)
 
         def announce():
             if mode == "fast":
-                self._chat_append("\n[fast mode: BFS-only retrieval]\n", "system")
-            elif picked:
-                self._chat_append("\n[retrieved: ", "system")
-                self._chat_append(", ".join(picked[:8]), "citation")
-                self._chat_append("]\n", "system")
-            elif bfs_snippets:
+                self._chat_append("\n[fast: BFS picked ", "system")
                 self._chat_append(
-                    "\n[planner picked nothing; falling back to BFS]\n",
+                    ", ".join(picked[:8]) if picked else "(nothing)",
+                    "citation",
+                )
+                self._chat_append("]\n", "system")
+            elif picked:
+                self._chat_append(
+                    f"\n[quality: planner {len(planner_picks)} ∪ BFS "
+                    f"{len(bfs_picks)} → ",
                     "system",
                 )
+                self._chat_append(", ".join(picked[:8]), "citation")
+                self._chat_append("]\n", "system")
             else:
                 self._chat_append(
                     "\n[no graph context available for this question]\n",
@@ -1168,6 +1189,28 @@ class GraphifyApp:
     _NODE_LINE_RE = re.compile(
         r"NODE\s+(.+?)\s+\[src=(?P<src>[^\s]+)\s+loc=(?P<loc>L?\d+)"
     )
+
+    def _node_ids_from_bfs(self, bfs_out: str) -> list[str]:
+        """Map NODE lines from `graphify query` output back to graph node
+        ids by (source_file, source_location) lookup."""
+        if not bfs_out or not self.graph:
+            return []
+        # Build a (src, loc) -> id index once.
+        index: dict[tuple[str, str], str] = {}
+        for nid, attrs in self.graph.nodes(data=True):
+            src = str(attrs.get("source_file", ""))
+            loc = str(attrs.get("source_location", "")).lstrip("L")
+            if src and loc:
+                index[(src, loc)] = nid
+        out: list[str] = []
+        seen: set[str] = set()
+        for m in self._NODE_LINE_RE.finditer(bfs_out):
+            key = (m.group("src"), m.group("loc").lstrip("L"))
+            nid = index.get(key)
+            if nid and nid not in seen:
+                seen.add(nid)
+                out.append(nid)
+        return out
 
     def _collect_source_snippets(
         self, query_out: str, path: Path | None
