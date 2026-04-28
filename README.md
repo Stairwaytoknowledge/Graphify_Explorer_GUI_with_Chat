@@ -1,5 +1,8 @@
 # Graphify Explorer
 
+<!-- Replace OWNER/REPO once pushed -->
+[![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
+
 Desktop GUI around the [graphify](https://github.com/safishamsi/graphify) CLI.
 Point it at a local folder or a git URL and you get an interactive
 knowledge graph, a node-by-node detail view, and an optional chat tab
