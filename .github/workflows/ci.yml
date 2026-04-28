@@ -103,7 +103,7 @@ jobs:
           print("GUI smoke OK")
           PY
 
-      - name: End-to-end: build a real graph and query it
+      - name: "End-to-end: build a real graph and query it"
         shell: bash
         run: |
           if [[ "$RUNNER_OS" == "Windows" ]]; then
@@ -252,10 +252,10 @@ jobs:
           else
             PY=".venv/bin/python"
           fi
-          # Use a tiny stable repo so timing isn't network-flaky.
+          # Default repo is a tiny Python project (itsdangerous) so the
+          # numbers are stable and `graphify update` finds real code.
           "$PY" benchmarks/compare.py \
-            --repo https://github.com/octocat/Spoon-Knife \
-            --question "What files does this repo contain?" || true
+            --question "What does itsdangerous protect against?" || true
           test -f docs/COMPARISON.md && echo "COMPARISON.md regenerated"
 
       - name: Upload artifacts
