@@ -671,9 +671,28 @@ class GraphifyApp:
             variable=self.chat_mode_var, value="quality",
         ).pack(side=LEFT, padx=4)
 
-        # Conversation transcript
+        # Input row - PACK FIRST AND ANCHOR TO BOTTOM, so when the window
+        # gets squeezed the transcript shrinks but the input stays put.
+        inp = ttk.Frame(parent, style="Panel.TFrame")
+        inp.pack(side="bottom", fill="x", padx=10, pady=(0, 10))
+        self.chat_input_var = StringVar()
+        self.chat_entry = ttk.Entry(inp, textvariable=self.chat_input_var)
+        self.chat_entry.pack(side=LEFT, fill="x", expand=True, padx=(0, 6))
+        self.chat_entry.bind("<Return>", lambda e: self._chat_send())
+        self.chat_send_btn = ttk.Button(
+            inp, text="Send", style="Accent.TButton", command=self._chat_send
+        )
+        self.chat_send_btn.pack(side=LEFT)
+        ttk.Button(inp, text="Stop", command=self._chat_stop).pack(
+            side=LEFT, padx=4
+        )
+        ttk.Button(inp, text="Clear", command=self._chat_clear).pack(
+            side=LEFT, padx=4
+        )
+
+        # Conversation transcript fills the remaining space above the input.
         body = ttk.Frame(parent, style="Panel.TFrame")
-        body.pack(fill=BOTH, expand=True, padx=10, pady=(0, 6))
+        body.pack(side="top", fill=BOTH, expand=True, padx=10, pady=(0, 6))
         self.chat_text = Text(
             body,
             wrap="word",
@@ -702,24 +721,6 @@ class GraphifyApp:
             "citation", foreground=PALETTE["accent2"]
         )
         self.chat_text.configure(state=DISABLED)
-
-        # Input row
-        inp = ttk.Frame(parent, style="Panel.TFrame")
-        inp.pack(fill="x", padx=10, pady=(0, 10))
-        self.chat_input_var = StringVar()
-        self.chat_entry = ttk.Entry(inp, textvariable=self.chat_input_var)
-        self.chat_entry.pack(side=LEFT, fill="x", expand=True, padx=(0, 6))
-        self.chat_entry.bind("<Return>", lambda e: self._chat_send())
-        self.chat_send_btn = ttk.Button(
-            inp, text="Send", style="Accent.TButton", command=self._chat_send
-        )
-        self.chat_send_btn.pack(side=LEFT)
-        ttk.Button(inp, text="Stop", command=self._chat_stop).pack(
-            side=LEFT, padx=4
-        )
-        ttk.Button(inp, text="Clear", command=self._chat_clear).pack(
-            side=LEFT, padx=4
-        )
 
         # State
         self.ollama = OllamaClient()
@@ -1519,16 +1520,44 @@ class GraphifyApp:
 
     # ----- pan drag --------------------------------------------------------
 
+    @staticmethod
+    def _is_left_button(event) -> bool:
+        """matplotlib reports button as int (old) or MouseButton enum (new).
+        Both compare equal to 1, but be defensive against weird backends."""
+        b = getattr(event, "button", None)
+        if b is None:
+            return False
+        try:
+            return int(b) == 1
+        except (TypeError, ValueError):
+            return str(b).lower() in ("1", "left", "mousebutton.left")
+
+    def _toolbar_mode_active(self) -> bool:
+        """If the user has toggled pan/zoom on the matplotlib toolbar, it
+        already handles drags - skip ours so they don't fight."""
+        try:
+            mode = getattr(self.canvas.toolbar, "mode", "")
+            return bool(mode)  # "" or "PAN/ZOOM" or "ZOOM"
+        except Exception:
+            return False
+
     def _on_press(self, event) -> None:
         """Start panning on left-click in empty area. Clicks on a node fall
         through to pick_event for selection (no pan in that case)."""
-        if event.inaxes != self.ax or event.button != 1:
+        if event.inaxes != self.ax:
+            return
+        if not self._is_left_button(event):
+            return
+        if self._toolbar_mode_active():
             return
         # If the click hits a node, let _on_pick handle it - don't pan.
         if self.node_artist is not None:
-            cont, _ = self.node_artist.contains(event)
-            if cont:
-                return
+            try:
+                cont, _ = self.node_artist.contains(event)
+                if cont:
+                    return
+            except Exception:
+                pass
         self._pan_state = (
             event.x,
             event.y,
@@ -1541,7 +1570,7 @@ class GraphifyApp:
             pass
 
     def _on_release(self, event) -> None:
-        if event.button != 1:
+        if not self._is_left_button(event):
             return
         self._pan_state = None
         try:
