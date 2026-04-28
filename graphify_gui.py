@@ -639,11 +639,29 @@ class GraphifyApp:
             picker,
             textvariable=self.chat_model_var,
             state="readonly",
-            width=30,
+            width=22,
         )
         self.chat_model_combo.pack(side=LEFT, fill="x", expand=True)
         ttk.Button(
             picker, text="Refresh", command=self._refresh_models
+        ).pack(side=LEFT, padx=4)
+
+        # Fast vs quality retrieval mode.
+        #   quality: 2-stage Karpathy-style planner + drill + answer
+        #   fast:    single call, BFS slice + source snippets only
+        mode_row = ttk.Frame(parent, style="Panel.TFrame")
+        mode_row.pack(fill="x", padx=10, pady=(0, 6))
+        ttk.Label(mode_row, text="Retrieval:", style="Dim.TLabel").pack(
+            side=LEFT, padx=(0, 6)
+        )
+        self.chat_mode_var = StringVar(value="quality")
+        ttk.Radiobutton(
+            mode_row, text="Quality (planner + drill)",
+            variable=self.chat_mode_var, value="quality",
+        ).pack(side=LEFT, padx=4)
+        ttk.Radiobutton(
+            mode_row, text="Fast (BFS only)",
+            variable=self.chat_mode_var, value="fast",
         ).pack(side=LEFT, padx=4)
 
         # Conversation transcript
@@ -809,13 +827,11 @@ class GraphifyApp:
         self.chat_thread.start()
 
     def _chat_worker(self, question: str, model: str) -> None:
-        """Two-stage 'LLM-wiki' retrieval, then streamed answer.
+        """Build context and stream an answer. Two retrieval modes:
 
-        Stage A: Show the model a TOC of the graph (top nodes per community)
-                 plus the GRAPH_REPORT excerpt and the conversation so far.
-                 Ask it to pick the node ids it wants to read.
-        Stage B: Read the picked nodes' source + their immediate neighbours.
-        Stage C: Stream a citation-grounded answer over that focused context.
+        quality - 2-stage Karpathy-style: planner picks node ids, drill
+                  reads their source + neighbours, then answer.
+        fast    - skip the planner; BFS slice + source snippets only.
         """
         path: Path | None = None
         try:
@@ -825,33 +841,34 @@ class GraphifyApp:
         except Exception:
             pass
 
-        # ---------- Stage A: build a TOC + plan retrieval -------------------
-        toc, all_ids = self._build_graph_toc(path)
+        mode = self.chat_mode_var.get()
         report_excerpt = self._read_report_excerpt(path, limit=1500)
 
         picked: list[str] = []
-        if toc and all_ids:
-            picked = self._plan_retrieval(
-                model=model,
-                question=question,
-                toc=toc,
-                report=report_excerpt,
-                valid_ids=all_ids,
-            )
+        if mode == "quality":
+            toc, all_ids = self._build_graph_toc(path)
+            if toc and all_ids:
+                picked = self._plan_retrieval(
+                    model=model,
+                    question=question,
+                    toc=toc,
+                    report=report_excerpt,
+                    valid_ids=all_ids,
+                )
 
-        # Always also keep the BFS slice as a backstop - it sometimes
-        # surfaces nodes the planning step misses.
+        # BFS slice always runs - it's the backstop in quality mode and the
+        # primary source in fast mode.
         bfs_out = self._run_graphify_capture(
             ["query", question, "--budget", "1200"], cwd=path
         )
 
-        # ---------- Stage B: drill into picked nodes ------------------------
-        snippets = self._snippets_for_node_ids(picked, path)
+        snippets = self._snippets_for_node_ids(picked, path) if picked else []
         bfs_snippets = self._collect_source_snippets(bfs_out, path)
 
-        # Tell the user what the planner actually chose (transparent retrieval).
         def announce():
-            if picked:
+            if mode == "fast":
+                self._chat_append("\n[fast mode: BFS-only retrieval]\n", "system")
+            elif picked:
                 self._chat_append("\n[retrieved: ", "system")
                 self._chat_append(", ".join(picked[:8]), "citation")
                 self._chat_append("]\n", "system")
