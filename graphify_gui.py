@@ -512,8 +512,13 @@ class GraphifyApp:
         self.canvas.mpl_connect("pick_event", self._on_pick)
         # Mouse-wheel zoom centred on the cursor.
         self.canvas.mpl_connect("scroll_event", self._on_scroll)
-        # Hover tooltip showing label / src / community.
-        self.canvas.mpl_connect("motion_notify_event", self._on_hover)
+        # Click-and-drag pan + hover tooltip share the motion event.
+        self.canvas.mpl_connect("motion_notify_event", self._on_motion)
+        self.canvas.mpl_connect("button_press_event", self._on_press)
+        self.canvas.mpl_connect("button_release_event", self._on_release)
+        # Pan drag state: None when not dragging, else
+        # (press_x_pixels, press_y_pixels, xlim_at_press, ylim_at_press).
+        self._pan_state: tuple | None = None
         self._hover_annot = self.ax.annotate(
             "", xy=(0, 0), xytext=(12, 12), textcoords="offset points",
             color=PALETTE["fg"], fontsize=8,
@@ -1512,8 +1517,62 @@ class GraphifyApp:
         self.ax.set_ylim(new_ylim)
         self.canvas.draw_idle()
 
-    def _on_hover(self, event) -> None:
-        """Show a tooltip with label / src / community / degree on hover."""
+    # ----- pan drag --------------------------------------------------------
+
+    def _on_press(self, event) -> None:
+        """Start panning on left-click in empty area. Clicks on a node fall
+        through to pick_event for selection (no pan in that case)."""
+        if event.inaxes != self.ax or event.button != 1:
+            return
+        # If the click hits a node, let _on_pick handle it - don't pan.
+        if self.node_artist is not None:
+            cont, _ = self.node_artist.contains(event)
+            if cont:
+                return
+        self._pan_state = (
+            event.x,
+            event.y,
+            self.ax.get_xlim(),
+            self.ax.get_ylim(),
+        )
+        try:
+            self.canvas.get_tk_widget().config(cursor="fleur")
+        except Exception:
+            pass
+
+    def _on_release(self, event) -> None:
+        if event.button != 1:
+            return
+        self._pan_state = None
+        try:
+            self.canvas.get_tk_widget().config(cursor="")
+        except Exception:
+            pass
+
+    def _on_motion(self, event) -> None:
+        """Routes to pan when dragging, otherwise to hover tooltip."""
+        # Pan path: convert pixel delta to data delta using press-time
+        # axis extents. This is robust to the limits changing mid-drag.
+        if self._pan_state is not None:
+            if event.x is None or event.y is None:
+                return
+            x_press, y_press, xlim, ylim = self._pan_state
+            bbox = self.ax.bbox
+            if bbox.width <= 0 or bbox.height <= 0:
+                return
+            dx_pixels = event.x - x_press
+            dy_pixels = event.y - y_press
+            dx_data = -(xlim[1] - xlim[0]) * dx_pixels / bbox.width
+            dy_data = -(ylim[1] - ylim[0]) * dy_pixels / bbox.height
+            self.ax.set_xlim(xlim[0] + dx_data, xlim[1] + dx_data)
+            self.ax.set_ylim(ylim[0] + dy_data, ylim[1] + dy_data)
+            # Hide hover tooltip while panning.
+            if self._hover_annot.get_visible():
+                self._hover_annot.set_visible(False)
+            self.canvas.draw_idle()
+            return
+
+        # Hover path
         if not self.node_keys or self.node_artist is None:
             return
         if event.inaxes != self.ax:
