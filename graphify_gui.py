@@ -652,7 +652,7 @@ class GraphifyApp:
         ).pack(side=LEFT, padx=4)
 
         # Fast vs quality retrieval mode.
-        #   quality: 2-stage Karpathy-style planner + drill + answer
+        #   quality: 2-stage two-stage planner + drill + answer
         #   fast:    single call, BFS slice + source snippets only
         mode_row = ttk.Frame(parent, style="Panel.TFrame")
         mode_row.pack(fill="x", padx=10, pady=(0, 6))
@@ -837,7 +837,7 @@ class GraphifyApp:
     def _chat_worker(self, question: str, model: str) -> None:
         """Build context and stream an answer. Two retrieval modes:
 
-        quality - 2-stage Karpathy-style: planner picks node ids, drill
+        quality - 2-stage two-stage: planner picks node ids, drill
                   reads their source + neighbours, then answer.
         fast    - skip the planner; BFS slice + source snippets only.
         """
