@@ -2,6 +2,12 @@
 
 Folder or git URL in, knowledge graph out. Click a node for its details,
 ask a question against a local Ollama model in the Chat tab.
+
+This wrapper depends on `graphifyy` from PyPI, the work of Safi Shamsi:
+    upstream:  https://github.com/safishamsi/graphify
+    PyPI:      https://pypi.org/project/graphifyy/
+All graph extraction, clustering, query, and visualization comes from
+upstream. This file only adds the desktop UI around it.
 """
 
 from __future__ import annotations
