@@ -30,7 +30,10 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_REPO = "https://github.com/sindresorhus/is-plain-obj"
+# Tiny Python repo with real code. Used as the default test corpus so the
+# benchmark numbers are stable across machines and don't depend on whatever
+# happens to be installed locally.
+DEFAULT_REPO = "https://github.com/pallets/itsdangerous"
 DEFAULT_Q = "What does the main function do?"
 
 
