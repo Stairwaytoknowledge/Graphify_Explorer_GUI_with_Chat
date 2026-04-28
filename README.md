@@ -3,17 +3,18 @@
 <!-- Replace OWNER/REPO once pushed -->
 [![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
 
-Desktop GUI around the [graphify](https://github.com/safishamsi/graphify) CLI.
-Point it at a local folder or a git URL and you get an interactive
-knowledge graph, a node-by-node detail view, and an optional chat tab
-backed by a local Ollama model.
+> **Built on top of [graphify](https://github.com/safishamsi/graphify)
+> by [Safi Shamsi](https://github.com/safishamsi)** — PyPI
+> [`graphifyy`](https://pypi.org/project/graphifyy/). All graph
+> extraction, clustering, query, and visualization logic comes from
+> upstream. This repository adds a desktop UI, packaging, and a local
+> Ollama chat layer; it does not modify the graph engine. See
+> [NOTICE](NOTICE) for the full attribution and
+> [`docs/COMPARISON.md`](docs/COMPARISON.md) for measured numbers.
 
-The graph engine, the extraction, the clustering, the query algorithm,
-the vis.js HTML and the GRAPH_REPORT format are all upstream's work
-([Safi Shamsi](https://github.com/safishamsi),
-[`graphifyy`](https://pypi.org/project/graphifyy/) on PyPI). What this
-repo adds is packaging, a desktop UI, and a local-LLM chat layer on top
-of it. See [`docs/COMPARISON.md`](docs/COMPARISON.md) for measured numbers.
+Desktop GUI around the graphify CLI. Point it at a local folder or a
+git URL and you get an interactive knowledge graph, a node-by-node
+detail view, and an optional chat tab backed by a local Ollama model.
 
 ![Icon](icon.png)
 
@@ -182,8 +183,16 @@ Nothing is installed system-wide. Delete this folder and remove:
 
 ## Credits
 
-- Graphify: <https://github.com/safishamsi/graphify>
-- Author: <https://github.com/safishamsi>
-- PyPI: <https://pypi.org/project/graphifyy/>
+The underlying graph engine — extraction, Leiden clustering, BFS
+query, vis.js HTML viewer, GRAPH_REPORT format, multimodal pipeline,
+SHA256 cache, and everything else that does the actual work — is by
+**Safi Shamsi**:
 
-This wrapper is MIT.
+- Author: <https://github.com/safishamsi>
+- Repo:   <https://github.com/safishamsi/graphify>
+- PyPI:   <https://pypi.org/project/graphifyy/>
+
+If you find this wrapper useful, the credit for the heavy lifting
+belongs upstream. See [NOTICE](NOTICE) for the full attribution.
+
+This wrapper itself is MIT-licensed (see [LICENSE](LICENSE)).
