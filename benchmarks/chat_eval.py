@@ -198,8 +198,8 @@ def run_fast_mode(
 def run_quality_mode(
     app, model: str, repo: Path, question: str
 ) -> tuple[str, float, list[str]]:
-    """Two-stage planner + drill + answer, with BFS-pick union (matches
-    the GUI's _chat_worker behaviour)."""
+    """Two-stage planner + drill + answer, with BFS + embedding union
+    (matches the GUI's _chat_worker behaviour)."""
     bfs_out = graph_query(repo, question)
     bfs_picks = app._node_ids_from_bfs(bfs_out)
 
@@ -211,15 +211,16 @@ def run_quality_mode(
         report=rep, valid_ids=valid,
     )
     plan_secs = time.perf_counter() - t_plan
+    embed_picks = app._embed_topk_node_ids(question, k=8)
 
-    # Union: planner picks first, then BFS picks (dedup, cap 10).
+    # Union: planner ∪ BFS ∪ embed (dedup, cap 12).
     seen: set[str] = set()
     picked: list[str] = []
-    for nid in (*planner_picks, *bfs_picks):
+    for nid in (*planner_picks, *bfs_picks, *embed_picks):
         if nid not in seen:
             seen.add(nid)
             picked.append(nid)
-        if len(picked) >= 10:
+        if len(picked) >= 12:
             break
 
     snippets = app._snippets_for_node_ids(picked, repo)
