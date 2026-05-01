@@ -171,6 +171,26 @@ class OllamaClient:
             names.append(name)
         return names
 
+    def embed_one(
+        self, model: str, text: str, timeout: float = 60.0
+    ) -> list[float] | None:
+        """Single embedding via /api/embeddings. Returns None on failure."""
+        body = json.dumps({"model": model, "prompt": text}).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.host}/api/embeddings",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                d = json.load(r)
+            v = d.get("embedding")
+            if isinstance(v, list) and v:
+                return v
+            return None
+        except Exception:
+            return None
+
     def stream_chat(
         self,
         model: str,
@@ -213,6 +233,188 @@ class OllamaClient:
             yield f"\n[error: {exc}]"
         except Exception as exc:
             yield f"\n[error: {exc}]"
+
+
+# ============================================================ embedding RAG
+#
+# Plain-numpy embedding index over graph nodes. Built once after
+# `graphify update`, cached to graphify-out/embeddings.npz, keyed by the
+# SHA256 of graph.json. nomic-embed-text via Ollama, 768-dim float32.
+#
+# Used by the chat tab's Quality mode to recover semantic recall that the
+# keyword-BFS in `graphify query` misses.
+
+EMBED_MODEL_DEFAULT = "nomic-embed-text"
+EMBED_INDEX_FILE = "embeddings.npz"
+
+
+def _read_snippet(path: Path | None, src: str, line_no: int, span: int = 12) -> str:
+    """Return ~`span` lines of source around a node's recorded location."""
+    if not path or not src:
+        return ""
+    fp = (path / src).resolve()
+    if not fp.exists() or not fp.is_file():
+        return ""
+    try:
+        lines = fp.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    start = max(0, line_no - 3)
+    end = min(len(lines), line_no + span)
+    return "\n".join(lines[start:end])
+
+
+def _node_embedding_text(node_id: str, attrs: dict, repo: Path | None) -> str:
+    """The string we feed to nomic-embed-text for a graph node.
+    Label + source location + actual code snippet (when available)."""
+    label = attrs.get("label", node_id)
+    src = attrs.get("source_file", "")
+    loc = str(attrs.get("source_location", "")).lstrip("L")
+    line_no = int(loc) if loc.isdigit() else 0
+    snippet = _read_snippet(repo, src, line_no) if line_no else ""
+    parts = [str(label)]
+    if src:
+        parts.append(f"src: {src}{f' L{line_no}' if line_no else ''}")
+    if snippet:
+        parts.append(snippet)
+    return "\n".join(parts)
+
+
+def _graph_sha(graph_json_path: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with graph_json_path.open("rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def build_embedding_index(
+    graph,
+    repo: Path,
+    model: str = EMBED_MODEL_DEFAULT,
+    host: str = OLLAMA_HOST,
+    workers: int = 4,
+    progress=None,
+    stop_event: threading.Event | None = None,
+):
+    """Embed every node in `graph`. Returns (vectors, node_ids, model).
+
+    `progress(done, total)` is called periodically if provided.
+    `stop_event` lets callers cancel mid-build; partial result is returned.
+    """
+    import numpy as np
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    client = OllamaClient(host)
+    node_items = list(graph.nodes(data=True))
+    total = len(node_items)
+    if total == 0:
+        return np.zeros((0, 0), dtype=np.float32), [], model
+
+    # Probe dimensionality on the first call.
+    first_text = _node_embedding_text(node_items[0][0], node_items[0][1], repo)
+    first_vec = client.embed_one(model, first_text)
+    if first_vec is None:
+        raise RuntimeError(
+            "Ollama embedding call failed. Is the model installed? "
+            f"Try: ollama pull {model}"
+        )
+    dim = len(first_vec)
+    vectors = np.zeros((total, dim), dtype=np.float32)
+    vectors[0] = np.asarray(first_vec, dtype=np.float32)
+    node_ids: list[str] = [node_items[0][0]]
+
+    if progress:
+        progress(1, total)
+
+    def task(idx_item):
+        idx, (nid, attrs) = idx_item
+        if stop_event is not None and stop_event.is_set():
+            return idx, nid, None
+        text = _node_embedding_text(nid, attrs, repo)
+        return idx, nid, client.embed_one(model, text)
+
+    done = 1
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+        futures = [
+            ex.submit(task, (i, item))
+            for i, item in enumerate(node_items)
+            if i > 0
+        ]
+        for fut in as_completed(futures):
+            idx, nid, vec = fut.result()
+            if vec is None:
+                continue
+            if idx >= len(node_ids):
+                # Pad placeholder list - we'll index by position.
+                node_ids.extend([""] * (idx + 1 - len(node_ids)))
+            node_ids[idx] = nid
+            vectors[idx] = np.asarray(vec, dtype=np.float32)
+            done += 1
+            if progress and done % 16 == 0:
+                progress(done, total)
+            if stop_event is not None and stop_event.is_set():
+                break
+
+    # Drop any empty rows from cancellation / failed embeddings.
+    keep = [i for i, n in enumerate(node_ids) if n]
+    vectors = vectors[keep]
+    node_ids = [node_ids[i] for i in keep]
+    if progress:
+        progress(len(node_ids), total)
+    return vectors, node_ids, model
+
+
+def save_embedding_index(
+    out_dir: Path, vectors, node_ids: list[str], model: str, graph_sha: str
+) -> Path:
+    import numpy as np
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / EMBED_INDEX_FILE
+    np.savez(
+        path,
+        vectors=vectors,
+        node_ids=np.array(node_ids, dtype=object),
+        model=np.array(model),
+        graph_sha=np.array(graph_sha),
+    )
+    return path
+
+
+def load_embedding_index(out_dir: Path, expect_graph_sha: str | None = None):
+    """Returns (vectors, node_ids, model) or None if missing/stale."""
+    import numpy as np
+    path = out_dir / EMBED_INDEX_FILE
+    if not path.exists():
+        return None
+    try:
+        d = np.load(path, allow_pickle=True)
+    except Exception:
+        return None
+    if expect_graph_sha is not None:
+        sha = str(d["graph_sha"])
+        if sha != expect_graph_sha:
+            return None
+    vectors = d["vectors"]
+    node_ids = list(d["node_ids"])
+    model = str(d["model"])
+    return vectors, node_ids, model
+
+
+def cosine_topk(query_vec, vectors, k: int = 8):
+    """Return list of (index, score) for top-k cosine sims, descending."""
+    import numpy as np
+    if vectors is None or len(vectors) == 0:
+        return []
+    q = np.asarray(query_vec, dtype=np.float32)
+    qn = q / (np.linalg.norm(q) + 1e-12)
+    norms = np.linalg.norm(vectors, axis=1) + 1e-12
+    sims = (vectors @ qn) / norms
+    k = min(k, len(sims))
+    top = np.argpartition(-sims, k - 1)[:k]
+    top = top[np.argsort(-sims[top])]
+    return [(int(i), float(sims[i])) for i in top]
 
 
 def derive_clone_dest(url: str) -> Path:
@@ -658,8 +860,6 @@ class GraphifyApp:
         ).pack(side=LEFT, padx=4)
 
         # Fast vs quality retrieval mode.
-        #   quality: 2-stage two-stage planner + drill + answer
-        #   fast:    single call, BFS slice + source snippets only
         mode_row = ttk.Frame(parent, style="Panel.TFrame")
         mode_row.pack(fill="x", padx=10, pady=(0, 6))
         ttk.Label(mode_row, text="Retrieval:", style="Dim.TLabel").pack(
@@ -673,8 +873,27 @@ class GraphifyApp:
             variable=self.chat_mode_var, value="fast",
         ).pack(side=LEFT, padx=4)
         ttk.Radiobutton(
-            mode_row, text="Quality (planner ∪ BFS)",
+            mode_row, text="Quality (planner ∪ BFS ∪ embed)",
             variable=self.chat_mode_var, value="quality",
+        ).pack(side=LEFT, padx=4)
+
+        # Embedding index controls.
+        idx_row = ttk.Frame(parent, style="Panel.TFrame")
+        idx_row.pack(fill="x", padx=10, pady=(0, 6))
+        ttk.Label(idx_row, text="Index:", style="Dim.TLabel").pack(
+            side=LEFT, padx=(0, 6)
+        )
+        self.embed_status_var = StringVar(value="not built")
+        ttk.Label(
+            idx_row, textvariable=self.embed_status_var, style="Dim.TLabel"
+        ).pack(side=LEFT, padx=(0, 6))
+        ttk.Button(
+            idx_row, text="Build Embedding Index",
+            command=self._build_embed_index,
+        ).pack(side=LEFT, padx=4)
+        ttk.Button(
+            idx_row, text="Cancel build",
+            command=lambda: self.embed_stop_event.set(),
         ).pack(side=LEFT, padx=4)
 
         # Input row - PACK FIRST AND ANCHOR TO BOTTOM, so when the window
@@ -737,10 +956,147 @@ class GraphifyApp:
         # drains it on the main thread so we never touch Tk from a worker.
         self._model_probe_result: queue.Queue = queue.Queue()
 
+        # Embedding index state (numpy ndarray, parallel list of node ids).
+        self.embed_vectors = None
+        self.embed_node_ids: list[str] = []
+        self.embed_model: str = ""
+        self.embed_thread: threading.Thread | None = None
+        self.embed_stop_event = threading.Event()
+
         # Initial model probe (runs in background - don't block UI startup).
         threading.Thread(target=self._refresh_models_async, daemon=True).start()
 
     # ---------------------------------------------------------- chat actions
+
+    # ---------------------------------------------------------- embedding idx
+
+    def _try_load_embed_index(self) -> None:
+        """Look for graphify-out/embeddings.npz next to the loaded graph and
+        load it if its SHA matches the current graph.json. Called whenever a
+        new graph is loaded into the view."""
+        path = self._selected_path(silent=True)
+        if not path or not self.graph:
+            return
+        gj = path / "graphify-out" / "graph.json"
+        if not gj.exists():
+            return
+        try:
+            sha = _graph_sha(gj)
+            cached = load_embedding_index(
+                path / "graphify-out", expect_graph_sha=sha
+            )
+        except Exception:
+            cached = None
+        if cached is None:
+            self.embed_vectors = None
+            self.embed_node_ids = []
+            self.embed_model = ""
+            self.embed_status_var.set(
+                f"not built ({self.graph.number_of_nodes()} nodes pending)"
+            )
+            return
+        vectors, node_ids, model = cached
+        self.embed_vectors = vectors
+        self.embed_node_ids = node_ids
+        self.embed_model = model
+        self.embed_status_var.set(
+            f"loaded - {len(node_ids)} vecs ({model})"
+        )
+
+    def _build_embed_index(self) -> None:
+        if self.embed_thread and self.embed_thread.is_alive():
+            messagebox.showinfo("Busy", "Embedding build already running.")
+            return
+        if not self.graph:
+            messagebox.showwarning(
+                "No graph",
+                "Load or build a graph first - the index needs nodes to embed.",
+            )
+            return
+        path = self._selected_path()
+        if not path:
+            return
+        if not self.ollama.is_up():
+            messagebox.showerror(
+                "Ollama not running",
+                "Ollama is required for embeddings. Start it and run "
+                "`ollama pull nomic-embed-text`.",
+            )
+            return
+        self.embed_stop_event = threading.Event()
+        self.embed_thread = threading.Thread(
+            target=self._build_embed_worker,
+            args=(path,),
+            daemon=True,
+        )
+        self.embed_thread.start()
+
+    def _build_embed_worker(self, path: Path) -> None:
+        gj = path / "graphify-out" / "graph.json"
+        try:
+            sha = _graph_sha(gj)
+        except Exception as exc:
+            self.root.after(
+                0,
+                lambda: self.embed_status_var.set(f"build failed: {exc}"),
+            )
+            return
+
+        def progress(done: int, total: int):
+            self.root.after(
+                0,
+                lambda d=done, t=total: self.embed_status_var.set(
+                    f"building {d}/{t}..."
+                ),
+            )
+
+        try:
+            vectors, node_ids, model = build_embedding_index(
+                self.graph, path,
+                workers=4,
+                progress=progress,
+                stop_event=self.embed_stop_event,
+            )
+        except Exception as exc:
+            self.root.after(
+                0,
+                lambda e=exc: self.embed_status_var.set(f"build failed: {e}"),
+            )
+            return
+
+        try:
+            save_embedding_index(
+                path / "graphify-out", vectors, node_ids, model, sha
+            )
+        except Exception as exc:
+            self.root.after(
+                0,
+                lambda e=exc: self.embed_status_var.set(
+                    f"saved failed: {e} (in-memory only)"
+                ),
+            )
+
+        def apply():
+            self.embed_vectors = vectors
+            self.embed_node_ids = node_ids
+            self.embed_model = model
+            self.embed_status_var.set(
+                f"built - {len(node_ids)} vecs ({model})"
+            )
+        self.root.after(0, apply)
+
+    def _embed_topk_node_ids(
+        self, query: str, k: int = 8
+    ) -> list[str]:
+        if self.embed_vectors is None or len(self.embed_node_ids) == 0:
+            return []
+        if not self.embed_model:
+            return []
+        qv = self.ollama.embed_one(self.embed_model, query)
+        if qv is None:
+            return []
+        top = cosine_topk(qv, self.embed_vectors, k=k)
+        return [self.embed_node_ids[i] for i, _ in top]
 
     def _refresh_models(self) -> None:
         threading.Thread(target=self._refresh_models_async, daemon=True).start()
@@ -866,6 +1222,7 @@ class GraphifyApp:
         bfs_picks = self._node_ids_from_bfs(bfs_out)
 
         planner_picks: list[str] = []
+        embed_picks: list[str] = []
         if mode == "quality":
             toc, all_ids = self._build_graph_toc(path)
             if toc and all_ids:
@@ -876,17 +1233,19 @@ class GraphifyApp:
                     report=report_excerpt,
                     valid_ids=all_ids,
                 )
+            # Embedding top-K (no-op if no index loaded).
+            embed_picks = self._embed_topk_node_ids(question, k=8)
 
-        # In quality mode: union planner ∪ BFS so we get the planner's
-        # semantic picks plus the BFS keyword picks. In fast mode: BFS only.
+        # In quality mode: union planner ∪ BFS ∪ embed for the broadest
+        # recall. In fast mode: BFS only.
         if mode == "quality":
             seen: set[str] = set()
             picked: list[str] = []
-            for nid in (*planner_picks, *bfs_picks):
+            for nid in (*planner_picks, *bfs_picks, *embed_picks):
                 if nid not in seen:
                     seen.add(nid)
                     picked.append(nid)
-                if len(picked) >= 10:
+                if len(picked) >= 12:
                     break
         else:
             picked = bfs_picks[:10]
@@ -905,7 +1264,7 @@ class GraphifyApp:
             elif picked:
                 self._chat_append(
                     f"\n[quality: planner {len(planner_picks)} ∪ BFS "
-                    f"{len(bfs_picks)} → ",
+                    f"{len(bfs_picks)} ∪ embed {len(embed_picks)} → ",
                     "system",
                 )
                 self._chat_append(", ".join(picked[:8]), "citation")
@@ -1319,6 +1678,12 @@ class GraphifyApp:
             f"loaded from {gp}"
         )
         self._render_graph(G)
+        # Try to attach a previously-built embedding index (no-op if missing
+        # or stale by SHA).
+        try:
+            self._try_load_embed_index()
+        except Exception:
+            pass
 
     # Cap the inline matplotlib viewer at this many nodes. Beyond this the
     # layout solvers get slow and labels turn into mush - point users at the
