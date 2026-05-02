@@ -1,0 +1,9 @@
+# Optional dependencies. The base install (requirements.txt) is enough
+# for matplotlib visualization and chat. These unlock extra features.
+
+# Interactive Graph view (vis.js in a native webview window).
+# Click the "Interactive Graph" button after building a graph.
+# - Windows uses Edge WebView2 (built into Windows 10+).
+# - macOS uses WKWebView (built in).
+# - Linux may also need: sudo apt install python3-gi gir1.2-webkit2-4.0
+pywebview>=6.0

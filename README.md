@@ -116,8 +116,29 @@ don't have to keep watching.
 ## Graph rendering note
 
 The inline matplotlib view is capped at 300 nodes (top-N by degree).
-Larger graphs: click **Open HTML** for upstream's vis.js view, which
-handles thousands of nodes well.
+Larger graphs: click **Open HTML** for upstream's vis.js view, or use
+the **Interactive Graph** button (see below) to embed it in a native
+window with chat-driven highlighting.
+
+### Interactive Graph (optional, requires pywebview)
+
+Click **Interactive Graph** to open the upstream `graph.html` in a
+native webview window. It runs alongside the matplotlib pane (doesn't
+replace it). Hover, drag, zoom, click - all the things vis.js gives
+for free.
+
+When the chat answers, the picked nodes light up in the interactive
+window and the camera fits to them. Click any node in the interactive
+window to populate the Details tab back in the main GUI.
+
+To enable, install the optional dep:
+
+```
+pip install -r requirements-optional.txt
+```
+
+Without it, the button shows an install hint and the rest of the GUI
+works as before.
 
 ## Repo layout
 
