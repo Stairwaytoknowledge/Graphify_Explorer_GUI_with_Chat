@@ -1,20 +1,11 @@
-Graphify Explorer
-=================
+This project is a desktop GUI wrapper. It does not implement graph
+extraction, clustering, query, or visualization itself - all of that
+comes from the `graphifyy` package by Safi Shamsi:
 
-This project is a desktop GUI wrapper. It does not implement any graph
-extraction, clustering, query, or visualization itself - all of that is
-provided by the upstream `graphifyy` package, which is the work of:
-
-    Safi Shamsi
-    https://github.com/safishamsi
     https://github.com/safishamsi/graphify
     https://pypi.org/project/graphifyy/
 
 `graphifyy` is installed as a runtime dependency by the OS-specific
-installer scripts (`Install-Windows.bat`, `Install-macOS.command`,
-`install-linux.sh`). It is not redistributed by this project.
-
-If you find Graphify Explorer useful, the credit for the underlying graph
-engine belongs upstream. Please consider starring the upstream repository.
+installer scripts. It is not redistributed by this repository.
 
 This wrapper itself is licensed under the MIT License (see LICENSE).
