@@ -639,6 +639,10 @@ class GraphifyApp:
         ttk.Button(actions, text="Open HTML", command=self._open_html).pack(
             side=LEFT, padx=4
         )
+        ttk.Button(
+            actions, text="Interactive Graph",
+            command=self._open_interactive_view,
+        ).pack(side=LEFT, padx=4)
         ttk.Button(actions, text="Open Report", command=self._open_report).pack(
             side=LEFT, padx=4
         )
@@ -1272,6 +1276,11 @@ class GraphifyApp:
                     "system",
                 )
         self.root.after(0, announce)
+
+        # If the Interactive Graph window is open, highlight the picked
+        # nodes there too. No-op when the subprocess isn't running.
+        if picked:
+            self._highlight_in_vis(picked)
 
         # ---------- Stage C: build context and stream the answer -----------
         ctx_lines: list[str] = []
@@ -2306,6 +2315,138 @@ class GraphifyApp:
             )
             return
         webbrowser.open(html.as_uri())
+
+    # ---- interactive (vis.js via pywebview subprocess) -------------------
+
+    def _open_interactive_view(self) -> None:
+        """Spawn graphify_vis_window.py as a subprocess pointing at the
+        upstream graph.html. Communicate via newline-delimited JSON on
+        stdin/stdout. The matplotlib pane is unaffected."""
+        if getattr(self, "vis_proc", None) and self.vis_proc.poll() is None:
+            messagebox.showinfo(
+                "Already open",
+                "Interactive Graph window is already running.",
+            )
+            return
+        path = self._selected_path()
+        if not path:
+            return
+        html = path / "graphify-out" / "graph.html"
+        if not html.exists():
+            messagebox.showinfo(
+                "Not built",
+                f"No graph.html yet. Build the graph first.\n\nLooked at:\n{html}",
+            )
+            return
+        script = APP_DIR / "graphify_vis_window.py"
+        if not script.exists():
+            messagebox.showerror(
+                "Missing helper",
+                f"graphify_vis_window.py not found next to the GUI.",
+            )
+            return
+        # Probe pywebview availability before spawning - friendlier error.
+        try:
+            r = subprocess.run(
+                [sys.executable, "-c", "import webview"],
+                capture_output=True, text=True, timeout=10,
+            )
+        except Exception as exc:
+            messagebox.showerror("pywebview check failed", str(exc))
+            return
+        if r.returncode != 0:
+            messagebox.showerror(
+                "pywebview not installed",
+                "The Interactive Graph view needs pywebview.\n\n"
+                "Install it with:\n"
+                "    .venv/Scripts/pip install pywebview\n\n"
+                "On Windows it uses Edge WebView2 (already in Win10+).\n"
+                "On macOS it uses WKWebView (built in).\n"
+                "On Linux you may also need: sudo apt install python3-gi "
+                "gir1.2-webkit2-4.0",
+            )
+            return
+        try:
+            self.vis_proc = subprocess.Popen(
+                [sys.executable, str(script), str(html)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+        except Exception as exc:
+            messagebox.showerror("Failed to start", f"{exc}")
+            return
+        self._set_status("Interactive Graph: launching...")
+        threading.Thread(
+            target=self._vis_event_loop, daemon=True
+        ).start()
+
+    def _vis_event_loop(self) -> None:
+        """Read JSON events from the subprocess and dispatch to the main
+        thread via root.after."""
+        proc = self.vis_proc
+        if not proc or not proc.stdout:
+            return
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            ev = msg.get("event")
+            if ev == "ready":
+                self.root.after(
+                    0, lambda: self._set_status("Interactive Graph: ready")
+                )
+            elif ev == "click":
+                nid = msg.get("id")
+                if nid:
+                    self.root.after(
+                        0, lambda i=nid: self._select_node_from_vis(i)
+                    )
+            elif ev == "double_click":
+                nid = msg.get("id")
+                if nid:
+                    self.root.after(
+                        0, lambda i=nid: self._select_node_from_vis(i)
+                    )
+        # Subprocess exited.
+        self.root.after(
+            0, lambda: self._set_status("Interactive Graph: closed")
+        )
+
+    def _select_node_from_vis(self, node_id: str) -> None:
+        """Surface a node clicked in the vis.js window in the Details tab."""
+        if not self.graph or node_id not in self.graph:
+            return
+        self.selected_node = node_id
+        self._show_node_details(node_id)
+        try:
+            # Switch focus to the Details tab so the user sees the result.
+            self.notebook.select(0)
+        except Exception:
+            pass
+
+    def _vis_send(self, payload: dict) -> bool:
+        """Send a JSON command to the subprocess. Returns False if not
+        running. Safe to call from any chat-worker thread."""
+        proc = getattr(self, "vis_proc", None)
+        if not proc or proc.poll() is not None or not proc.stdin:
+            return False
+        try:
+            proc.stdin.write(json.dumps(payload) + "\n")
+            proc.stdin.flush()
+            return True
+        except (OSError, BrokenPipeError):
+            return False
+
+    def _highlight_in_vis(self, node_ids: list[str]) -> None:
+        if node_ids:
+            self._vis_send({"cmd": "highlight", "ids": list(node_ids)})
 
     def _open_report(self) -> None:
         path = self._selected_path()
