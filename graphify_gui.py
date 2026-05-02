@@ -1,13 +1,9 @@
 """Tkinter GUI for the graphify CLI.
 
-Folder or git URL in, knowledge graph out. Click a node for its details,
-ask a question against a local Ollama model in the Chat tab.
+Folder or git URL in, knowledge graph out. Click a node for details,
+ask questions against a local Ollama model in the Chat tab.
 
-This wrapper depends on `graphifyy` from PyPI, the work of Safi Shamsi:
-    upstream:  https://github.com/safishamsi/graphify
-    PyPI:      https://pypi.org/project/graphifyy/
-All graph extraction, clustering, query, and visualization comes from
-upstream. This file only adds the desktop UI around it.
+Depends on graphifyy from PyPI (https://github.com/safishamsi/graphify).
 """
 
 from __future__ import annotations
@@ -865,8 +861,9 @@ class GraphifyApp:
         ttk.Label(mode_row, text="Retrieval:", style="Dim.TLabel").pack(
             side=LEFT, padx=(0, 6)
         )
-        # Default Fast: empirically better refusal/must-hit on the eval
-        # set than Quality at the time of writing (see docs/CHAT_EVAL.md).
+        # Default Fast - it had better refusal/must-hit numbers in the
+        # initial eval. Quality is now competitive once the embedding
+        # index is built; see docs/CHAT_EVAL.md.
         self.chat_mode_var = StringVar(value="fast")
         ttk.Radiobutton(
             mode_row, text="Fast (BFS + snippets)",
@@ -1952,7 +1949,7 @@ class GraphifyApp:
     def _on_motion(self, event) -> None:
         """Routes to pan when dragging, otherwise to hover tooltip."""
         # Pan path: convert pixel delta to data delta using press-time
-        # axis extents. This is robust to the limits changing mid-drag.
+        # axis extents. Stays correct even when the limits shift mid-drag.
         if self._pan_state is not None:
             if event.x is None or event.y is None:
                 return

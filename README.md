@@ -1,73 +1,67 @@
 # Graphify Explorer
 
-<!-- Replace OWNER/REPO once pushed -->
-[![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
+[![CI](https://github.com/Stairwaytoknowledge/Graphify_Explorer_GUI_with_Chat/actions/workflows/ci.yml/badge.svg)](https://github.com/Stairwaytoknowledge/Graphify_Explorer_GUI_with_Chat/actions/workflows/ci.yml)
 
-> **Built on top of [graphify](https://github.com/safishamsi/graphify)
-> by [Safi Shamsi](https://github.com/safishamsi)** — PyPI
-> [`graphifyy`](https://pypi.org/project/graphifyy/). All graph
-> extraction, clustering, query, and visualization logic comes from
-> upstream. This repository adds a desktop UI, packaging, and a local
-> Ollama chat layer; it does not modify the graph engine. See
-> [NOTICE](NOTICE) for the full attribution and
-> [`docs/COMPARISON.md`](docs/COMPARISON.md) for measured numbers.
+A desktop GUI on top of [graphify](https://github.com/safishamsi/graphify)
+(by [Safi Shamsi](https://github.com/safishamsi),
+[`graphifyy`](https://pypi.org/project/graphifyy/) on PyPI). Point it at a
+local folder or a git URL and you get an interactive knowledge graph,
+node-by-node details, and a chat tab against a local Ollama model.
 
-Desktop GUI around the graphify CLI. Point it at a local folder or a
-git URL and you get an interactive knowledge graph, a node-by-node
-detail view, and an optional chat tab backed by a local Ollama model.
+The graph engine is upstream's. This repo adds packaging, the GUI, and
+the chat layer. See [NOTICE](NOTICE) for attribution and
+[`docs/COMPARISON.md`](docs/COMPARISON.md) for measured numbers.
 
 ![Icon](icon.png)
 
+## Screenshot
+
+> Add a screenshot of the running GUI here. A 1280x800 PNG of the main
+> window with a graph loaded and one chat answer visible is enough.
+> Recommended path: `docs/screenshot.png`. Insert with
+> `![Graphify Explorer in action](docs/screenshot.png)`.
+
 ## Install
 
-Pick the file for your OS and double-click it. Each one creates a
+Pick the file for your OS, double-click it. Each installer creates a
 `.venv` next to itself, installs `graphifyy` + `matplotlib` + `watchdog`,
 generates the icon, and registers a launcher.
 
 | OS      | File                  | What it produces                         |
 | ------- | --------------------- | ---------------------------------------- |
-| Windows | `Install-Windows.bat` | Desktop shortcut → `Graphify.vbs`        |
+| Windows | `Install-Windows.bat` | Desktop shortcut to `Graphify.vbs`       |
 | macOS   | `Install-macOS.command` | `Graphify Explorer.app` bundle         |
 | Linux   | `install-linux.sh`    | `~/.local/share/applications/*.desktop`  |
 
-Requirements:
-- Python 3.10+ *or* [`uv`](https://docs.astral.sh/uv/) on PATH.
-- `git` on PATH (only needed if you want to graph remote URLs).
-- Tkinter. On most distros it ships with Python; on Debian/Ubuntu install
-  `python3-tk` if missing.
+You need Python 3.10+ (or `uv` on PATH), `git` if you want to graph
+remote URLs, and Tkinter (on Debian/Ubuntu: `apt install python3-tk`).
 
 ## Use
 
-The input field accepts:
+The folder/URL field accepts:
 
-- a local folder path (`C:\Code\my-project`, `/home/me/repo`)
-- a git URL: `https://github.com/<owner>/<repo>`,
-  `git@github.com:<owner>/<repo>.git`, `ssh://...`, `git://...`,
+- a local path: `C:\Code\my-project`, `/home/me/repo`
+- a git URL: `https://github.com/...`, `git@github.com:...`, `ssh://...`,
   or SCP-style `user@host:/path/to/repo.git`
-- a network path: Windows UNC (`\\server\share\repo`), mapped drives
-  (`Z:\repo`), macOS SMB mounts (`/Volumes/...`), Linux NFS/SMB mounts
-  (`/mnt/...`, `/media/...`). Network paths produce a status-bar warning
-  about slower scans and write-back to the share.
+- a network path: Windows UNC (`\\server\share\repo`), mapped drives,
+  macOS SMB mounts (`/Volumes/...`), Linux mounts (`/mnt/...`)
 
-For URLs the wrapper does a shallow `git clone` first into
-`~/.graphify/repos/<owner>/<repo>/`. By default graph artifacts land in
-`graphify-out/` next to the source. The full destination is logged in the
-Output tab before the clone starts, and **Show in Files** opens it.
+For URLs the wrapper does a shallow `git clone` into
+`~/.graphify/repos/<owner>/<repo>/`. Graph artifacts land in
+`graphify-out/` next to the source. The destination is logged in the
+Output tab before the clone runs, and **Show in Files** opens it.
 
-If you point at a `.git/` directory by accident the wrapper redirects to
-the repo root.
+If you point at a `.git/` directory the wrapper redirects to the parent.
+Network paths produce a status-bar warning about slower scans.
 
 ### Custom output directory
 
-The **Output (optional)** field above the action buttons takes any
-directory you want. When set, the wrapper transparently redirects
-graphify's hardcoded `<source>/graphify-out` to your chosen location via:
+The **Output (optional)** field redirects graphify's hardcoded
+`<source>/graphify-out` to anywhere you want, via a directory junction
+on Windows (`mklink /J`, no admin) or a symlink on Unix. Bytes physically
+land in the chosen folder; graphify itself doesn't notice.
 
-- a directory junction on Windows (`mklink /J`, no admin needed)
-- a symlink on macOS / Linux (`os.symlink`)
-
-Bytes physically land in your chosen folder; graphify never knows the
-difference. Leave the field empty to keep the default behaviour.
+### Buttons
 
 | Button                   | Runs                                          |
 | ------------------------ | --------------------------------------------- |
@@ -79,102 +73,85 @@ difference. Leave the field empty to keep the default behaviour.
 | Show in Files            | Opens the folder in Explorer/Finder/xdg-open  |
 | Query / Explain / Path   | `graphify query / explain / path`             |
 
-The right-hand pane is a notebook with three tabs:
+The right pane has three tabs: **Details** (clicked-node info), **Chat
+(local LLM)**, and **Output** (subprocess stream).
 
-- **Details**: clicked-node label, source file, community, neighbours.
-- **Chat (local LLM)**: see below.
-- **Output**: streaming stdout/stderr from any subprocess the GUI spawned.
+### Chat tab
 
-### The chat tab
-
-If [Ollama](https://ollama.com) is running on `localhost:11434`, the chat
-tab discovers your installed models and lets you ask questions about the
-loaded repo.
+If [Ollama](https://ollama.com) is running on `localhost:11434`, the
+chat tab discovers your installed models and answers questions grounded
+in the graph.
 
 ```
-ollama pull qwen2.5:7b      # or qwen3-coder:30b, llama3.2:3b, etc.
+ollama pull qwen2.5:7b
+ollama pull nomic-embed-text     # for the embedding index (Quality mode)
 ```
 
-How a question is grounded:
+Two retrieval modes:
 
-1. Run `graphify query` to pull the BFS slice of the graph relevant to
-   the question.
-2. For every node mentioned in that slice, read 12 lines of actual
-   source from the file/line recorded in the graph (capped at 6
-   snippets).
-3. Append a slice of `GRAPH_REPORT.md` for high-level concepts.
-4. Send the bundle to the local model with `temperature=0.1`, a strict
-   system prompt that demands `[node_id]` citations, and a refusal
-   instruction: if the answer is not in the context, the model is told
-   to reply "I don't know based on the graph."
+- **Fast**: `graphify query` BFS slice + 12-line source snippets for
+  cited nodes, fed to the model with `temperature=0.1` and a strict
+  refusal-default system prompt.
+- **Quality**: same as Fast, plus a planner LLM call that picks 3-6
+  node ids from a table of contents, plus the embedding top-K from a
+  per-repo `nomic-embed-text` index. The three pick lists are unioned
+  before drilling into source.
 
-Trade-off: lower hallucination, but answers are bounded by what
-graphify's BFS surfaced. For better recall, increase the `--budget`
-default in `graphify query` or run an explicit `Explain` first on a
-seed node.
+Click **Build Embedding Index** once per repo. On a 1500-node graph
+this takes 5-15 minutes the first time (CPU-bound on Ollama embedding
+calls); the index is cached at `graphify-out/embeddings.npz` keyed by
+the SHA256 of `graph.json`, so it's instant on reload until the graph
+changes. Cancel button works mid-build; partial indices are usable.
 
-If Ollama isn't running, the chat tab tells you so and the rest of the
-GUI works as before. Nothing is sent to a hosted API; nothing leaves the
-machine.
+If Ollama isn't running, the tab tells you so and everything else still
+works. Nothing leaves the machine.
 
-### Progress and completion
+### Progress display
 
-While a build, clone, or query is running, the status bar shows
-`graphify update... working - elapsed M:SS`. On exit it shows
-`Done in M:SS` and fires a system beep + brings the window to the front
-so you don't have to keep watching.
+While a build, clone, or query runs, the status bar shows
+`graphify update... working - elapsed M:SS`. On exit:
+`Done in M:SS`, plus a system beep and a brief topmost flash so you
+don't have to keep watching.
 
-## Graph rendering caveat
+## Graph rendering note
 
-The inline matplotlib view is capped at 300 nodes (top-N by degree). For
-larger graphs, click **Open HTML** for the upstream vis.js view, which
+The inline matplotlib view is capped at 300 nodes (top-N by degree).
+Larger graphs: click **Open HTML** for upstream's vis.js view, which
 handles thousands of nodes well.
 
 ## Repo layout
 
 ```
 graphify_gui.py        Tkinter GUI; subprocesses graphify and Ollama
-make_icon.py           Generates icon.png and icon.ico (stdlib only)
+make_icon.py           Generates icon.png + icon.ico (stdlib only)
 requirements.txt       graphifyy, matplotlib, watchdog
 Install-Windows.bat    Win installer + Desktop shortcut
 Graphify.vbs / .bat    Win launchers
 Install-macOS.command  macOS installer + .app bundle
 install-linux.sh       Linux installer + .desktop entry
-benchmarks/compare.py  Reproducible measurements (see COMPARISON.md)
-docs/COMPARISON.md     What's actually different vs upstream, with numbers
-.github/workflows/ci.yml  Win/macOS/Linux × Py 3.11/3.12 matrix
+benchmarks/            compare.py + chat_eval.py + docs they generate
+scripts/run_ci_locally.sh   Same checks ci.yml runs, on your machine
+.github/workflows/ci.yml    Matrix: {ubuntu, windows, macos} x {3.11, 3.12}
 ```
 
 ## CI
 
-`.github/workflows/ci.yml` runs the actual installer on each OS, builds
-a real graph, and exercises every behaviour the README claims. Matrix:
-`{ubuntu-latest, windows-latest, macos-latest} × {3.11, 3.12}`.
+`.github/workflows/ci.yml` runs the OS installer on each cell, builds a
+real graph from a small Python tree, and runs `query` + `explain`
+against it. It also unit-tests the URL/path helpers, verifies the
+custom-output junction/symlink, checks each launcher's shape, runs the
+launcher with `GRAPHIFY_TEST_AUTOQUIT=1` to prove it actually opens the
+GUI, and regenerates `docs/COMPARISON.md`.
 
-For each cell it:
+Linux uses Xvfb for the headless display. macOS uses Aqua. Windows
+uses the Tk shipped with Python.
 
-1. Runs the OS-specific installer end-to-end.
-2. Verifies icons, the `graphify` CLI, and the GUI Tk window construct.
-3. Runs `graphify update / query / explain` on a small Python tree.
-4. Runs unit asserts on `is_url`, `looks_like_network_path`, and
-   `derive_clone_dest`.
-5. Sets a custom output directory, builds a graph, asserts the bytes
-   landed in the custom dir (proves the junction/symlink redirect).
-6. Verifies each launcher (`Graphify.bat`, `Graphify.command`,
-   `Graphify.sh`, the macOS `.app` bundle, the Linux `.desktop` entry)
-   exists and points at the right Python.
-7. Invokes the launcher with `GRAPHIFY_TEST_AUTOQUIT=1` so it opens the
-   GUI, waits 800 ms, and exits. The launcher round-trip returning 0 is
-   the "double-click works" proof.
-8. Re-runs `benchmarks/compare.py` so `docs/COMPARISON.md` stays in
-   sync with the wrapper's behaviour.
-
-Linux uses Xvfb for the headless display. macOS uses its real Aqua
-session. Windows uses the real Tk that ships with Python.
+`bash scripts/run_ci_locally.sh` runs the same checks on whatever OS
+you invoke it from.
 
 ## Uninstall
 
-Nothing is installed system-wide. Delete this folder and remove:
+Nothing is installed system-wide. Delete this folder, then remove:
 
 - Windows: `%USERPROFILE%\Desktop\Graphify Explorer.lnk`
 - macOS: `Graphify Explorer.app`
@@ -183,16 +160,11 @@ Nothing is installed system-wide. Delete this folder and remove:
 
 ## Credits
 
-The underlying graph engine — extraction, Leiden clustering, BFS
-query, vis.js HTML viewer, GRAPH_REPORT format, multimodal pipeline,
-SHA256 cache, and everything else that does the actual work — is by
-**Safi Shamsi**:
+The graph engine, extraction, clustering, BFS query, vis.js viewer,
+report format, and SHA256 cache are all
+[Safi Shamsi](https://github.com/safishamsi)'s work in
+[`safishamsi/graphify`](https://github.com/safishamsi/graphify) /
+[`graphifyy` on PyPI](https://pypi.org/project/graphifyy/). See
+[NOTICE](NOTICE).
 
-- Author: <https://github.com/safishamsi>
-- Repo:   <https://github.com/safishamsi/graphify>
-- PyPI:   <https://pypi.org/project/graphifyy/>
-
-If you find this wrapper useful, the credit for the heavy lifting
-belongs upstream. See [NOTICE](NOTICE) for the full attribution.
-
-This wrapper itself is MIT-licensed (see [LICENSE](LICENSE)).
+This wrapper is MIT-licensed (see [LICENSE](LICENSE)).

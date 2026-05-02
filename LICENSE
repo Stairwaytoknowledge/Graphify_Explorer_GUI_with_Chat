@@ -19,9 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
-
----
-
-This project wraps and depends on `graphifyy` (https://pypi.org/project/graphifyy/),
-which is the work of Safi Shamsi (https://github.com/safishamsi/graphify) and
-is distributed under its own license. See the upstream repository for details.
