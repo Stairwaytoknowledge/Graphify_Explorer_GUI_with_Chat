@@ -137,11 +137,16 @@ def main() -> int:
         return 2
 
     api = Api()
+    # Explicit position/size so window placement is predictable and the
+    # screenshot helper can crop to exact bounds.
     window = webview.create_window(
         "Graphify - Interactive",
         html_path.as_uri(),
         width=1280,
         height=860,
+        x=80,
+        y=60,
+        resizable=True,
         js_api=api,
     )
 

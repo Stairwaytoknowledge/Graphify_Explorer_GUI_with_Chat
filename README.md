@@ -14,12 +14,13 @@ the chat layer. See [NOTICE](NOTICE) for attribution and
 
 ![Icon](icon.png)
 
-## Screenshot
+## Screenshots
 
-> Add a screenshot of the running GUI here. A 1280x800 PNG of the main
-> window with a graph loaded and one chat answer visible is enough.
-> Recommended path: `docs/screenshot.png`. Insert with
-> `![Graphify Explorer in action](docs/screenshot.png)`.
+The Interactive Graph view on [`pallets/click`](https://github.com/pallets/click)
+(1,589 nodes, 5,630 edges, 14 communities):
+
+![pallets/click graphified](docs/sample_image.png)
+![pallets/click graphified - alternate view](docs/sampele_image2.png)
 
 ## Install
 
