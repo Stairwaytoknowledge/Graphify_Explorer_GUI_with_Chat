@@ -23,6 +23,7 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 from urllib.parse import urlparse
+import tkinter as tk
 from tkinter import (
     BOTH,
     DISABLED,
@@ -772,13 +773,16 @@ class GraphifyApp:
         self.notebook = nb
 
         details_tab = ttk.Frame(nb, style="Panel.TFrame")
+        browse_tab = ttk.Frame(nb, style="Panel.TFrame")
         chat_tab = ttk.Frame(nb, style="Panel.TFrame")
         output_tab = ttk.Frame(nb, style="Panel.TFrame")
         nb.add(details_tab, text="Details")
+        nb.add(browse_tab, text="Browse")
         nb.add(chat_tab, text="Chat (local LLM)")
         nb.add(output_tab, text="Output")
 
         self._build_details_tab(details_tab)
+        self._build_browse_tab(browse_tab)
         self._build_chat_tab(chat_tab)
         self._build_output_tab(output_tab)
 
@@ -799,6 +803,352 @@ class GraphifyApp:
         )
         self.detail_text.pack(fill=BOTH, expand=True, padx=10, pady=(0, 10))
         self._set_detail_placeholder()
+
+    # ----- Browse tab -----------------------------------------------------
+
+    # Names that almost always indicate an entry point.
+    _ENTRY_NAMES = {
+        "main", "main()", "app", "app()", "application",
+        "cli", "cli()", "run", "run()", "__main__",
+    }
+
+    def _build_browse_tab(self, parent: ttk.Frame) -> None:
+        # Top: "Where does the code start?" card
+        card = ttk.LabelFrame(parent, text="Where does the code start?")
+        card.pack(fill="x", padx=10, pady=(10, 6))
+
+        self.entry_var = StringVar(
+            value="(load a graph and click Refresh to detect entry points)"
+        )
+        ttk.Label(
+            card, textvariable=self.entry_var, style="Dim.TLabel",
+            wraplength=400,
+        ).pack(anchor="w", padx=8, pady=(4, 4))
+
+        list_frame = ttk.Frame(card, style="Panel.TFrame")
+        list_frame.pack(fill="x", padx=8, pady=(0, 8))
+        self.entry_listbox = tk.Listbox(
+            list_frame,
+            height=5,
+            background=PALETTE["panel_alt"],
+            foreground=PALETTE["fg"],
+            selectbackground=PALETTE["accent"],
+            selectforeground="#0b1220",
+            relief="flat",
+            borderwidth=0,
+            activestyle="none",
+        )
+        self.entry_listbox.pack(side=LEFT, fill="x", expand=True)
+        self.entry_listbox.bind("<<ListboxSelect>>", self._on_entry_picked)
+        # Map selection index -> node id
+        self._entry_node_ids: list[str] = []
+
+        # Middle: filesystem tree of files in the graph
+        tree_frame = ttk.LabelFrame(parent, text="Files in this graph")
+        tree_frame.pack(fill=BOTH, expand=True, padx=10, pady=6)
+
+        inner = ttk.Frame(tree_frame, style="Panel.TFrame")
+        inner.pack(fill=BOTH, expand=True, padx=4, pady=4)
+        self.fs_tree = ttk.Treeview(inner, show="tree", height=14)
+        sb = ttk.Scrollbar(inner, orient="vertical", command=self.fs_tree.yview)
+        self.fs_tree.configure(yscrollcommand=sb.set)
+        sb.pack(side=RIGHT, fill="y")
+        self.fs_tree.pack(side=LEFT, fill=BOTH, expand=True)
+        self.fs_tree.bind("<<TreeviewSelect>>", self._on_fs_picked)
+        # Map tree-iid -> node id (only set on leaves that map to a node)
+        self._fs_iid_to_node: dict[str, str] = {}
+
+        # Bottom: Refresh + Mermaid export
+        buttons = ttk.Frame(parent, style="Panel.TFrame")
+        buttons.pack(fill="x", padx=10, pady=(6, 10))
+        ttk.Button(
+            buttons, text="Refresh from graph",
+            command=self._refresh_browse_from_graph,
+        ).pack(side=LEFT, padx=(0, 6))
+        ttk.Button(
+            buttons, text="Export Mermaid (overview)",
+            style="Accent.TButton",
+            command=self._export_mermaid_overview,
+        ).pack(side=LEFT, padx=4)
+
+    # ---- entry-point detection (pure function of the graph) -------------
+
+    # Path segments that indicate the file is NOT a real entry point of
+    # the library/app under analysis. We deprioritize these heavily.
+    _DEPRIORITIZE_SEGMENTS = (
+        "tests/", "test/", "docs/", "doc/", "examples/", "example/",
+        "demo/", "demos/", "_test/", "_example/", "fixtures/",
+    )
+
+    def _detect_entry_points(self) -> list[dict]:
+        """Find likely entry points. Returns scored, sorted list."""
+        if not self.graph:
+            return []
+        out: list[dict] = []
+        seen: set[str] = set()
+
+        for nid, attrs in self.graph.nodes(data=True):
+            label = (attrs.get("label") or "").strip()
+            src = (attrs.get("source_file") or "").replace("\\", "/")
+            loc = attrs.get("source_location", "")
+            bare = label.replace("()", "").strip()
+
+            score = 0
+            reasons: list[str] = []
+
+            base = src.rsplit("/", 1)[-1] if src else ""
+            # Strong: path ends in __main__.py
+            if base == "__main__.py":
+                score += 60
+                reasons.append("file is __main__.py")
+            # Strong: function/class named like an entry
+            if bare.lower() in self._ENTRY_NAMES or label.lower() in self._ENTRY_NAMES:
+                score += 50
+                reasons.append(f"named {label!r}")
+            # Medium: path has cli/ or bin/ or main/ or scripts/ segment
+            path_for_seg = f"/{src}/" if src else ""
+            for seg in ("cli/", "bin/", "main/", "entrypoints/", "scripts/"):
+                if f"/{seg}" in path_for_seg:
+                    score += 15
+                    reasons.append(f"path has /{seg.rstrip('/')}/")
+                    break
+            # Medium: in-degree 0 in directed graph (true source)
+            try:
+                if self.graph.is_directed() and self.graph.in_degree(nid) == 0 \
+                        and self.graph.out_degree(nid) > 0:
+                    score += 10
+                    reasons.append("no incoming edges")
+            except Exception:
+                pass
+
+            # Heavy deprioritize: tests, examples, docs aren't the real
+            # entry points of the library being analyzed.
+            for seg in self._DEPRIORITIZE_SEGMENTS:
+                if seg in src:
+                    score -= 40
+                    reasons.append(f"in {seg.rstrip('/')}/")
+                    break
+
+            if score > 0 and nid not in seen:
+                seen.add(nid)
+                out.append({
+                    "node_id": nid,
+                    "label": label or nid,
+                    "src": src,
+                    "loc": loc,
+                    "score": score,
+                    "reason": "; ".join(reasons),
+                })
+
+        out.sort(key=lambda d: (-d["score"], d["src"]))
+        return out[:10]
+
+    def _refresh_browse_from_graph(self) -> None:
+        """Populate the entry-point listbox and the filesystem tree."""
+        # Entry points
+        self.entry_listbox.delete(0, tk.END)
+        self._entry_node_ids = []
+        if not self.graph:
+            self.entry_var.set(
+                "Load or build a graph first - then click Refresh."
+            )
+        else:
+            entries = self._detect_entry_points()
+            if not entries:
+                self.entry_var.set(
+                    "No obvious entry points detected. The graph may be a "
+                    "library with no clear `main`."
+                )
+            else:
+                self.entry_var.set(
+                    f"Found {len(entries)} candidate entry point(s). "
+                    "Click one to highlight it."
+                )
+                for e in entries:
+                    line = f"{e['label']}  -  {e['src']}  ({e['reason']})"
+                    self.entry_listbox.insert(tk.END, line)
+                    self._entry_node_ids.append(e["node_id"])
+
+        # Filesystem tree
+        for iid in self.fs_tree.get_children(""):
+            self.fs_tree.delete(iid)
+        self._fs_iid_to_node = {}
+        if self.graph:
+            self._populate_fs_tree()
+
+    def _populate_fs_tree(self) -> None:
+        """Build a directory -> file -> node hierarchy from graph nodes."""
+        # Group nodes by source_file
+        by_file: dict[str, list[tuple[str, str]]] = {}
+        for nid, attrs in self.graph.nodes(data=True):
+            src = (attrs.get("source_file") or "").replace("\\", "/")
+            if not src:
+                continue
+            label = attrs.get("label") or nid
+            by_file.setdefault(src, []).append((nid, label))
+
+        # Insert directories on demand using a path -> iid cache.
+        dir_iid: dict[str, str] = {"": ""}  # empty path is the root
+        for src in sorted(by_file):
+            parts = src.split("/")
+            # Walk dirs
+            cur_path = ""
+            parent = ""
+            for d in parts[:-1]:
+                cur_path = f"{cur_path}/{d}" if cur_path else d
+                if cur_path not in dir_iid:
+                    new_iid = self.fs_tree.insert(
+                        parent, "end", text=f"{d}/", open=False,
+                    )
+                    dir_iid[cur_path] = new_iid
+                parent = dir_iid[cur_path]
+            # Insert the file
+            file_name = parts[-1]
+            file_iid = self.fs_tree.insert(
+                parent, "end",
+                text=f"{file_name}  ({len(by_file[src])} nodes)",
+                open=False,
+            )
+            # Insert nodes under it
+            for nid, label in sorted(by_file[src], key=lambda t: t[1]):
+                node_iid = self.fs_tree.insert(
+                    file_iid, "end", text=f"  - {label}",
+                )
+                self._fs_iid_to_node[node_iid] = nid
+
+    # ---- click handlers --------------------------------------------------
+
+    def _on_entry_picked(self, _event=None) -> None:
+        sel = self.entry_listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        if idx >= len(self._entry_node_ids):
+            return
+        nid = self._entry_node_ids[idx]
+        self._select_and_highlight_node(nid)
+
+    def _on_fs_picked(self, _event=None) -> None:
+        sel = self.fs_tree.selection()
+        if not sel:
+            return
+        nid = self._fs_iid_to_node.get(sel[0])
+        if nid:
+            self._select_and_highlight_node(nid)
+
+    def _select_and_highlight_node(self, node_id: str) -> None:
+        """Select a node: populate Details, highlight in matplotlib, and
+        in vis.js if open."""
+        if not self.graph or node_id not in self.graph:
+            return
+        self.selected_node = node_id
+        self._show_node_details(node_id)
+        # Switch to Details so user sees the result.
+        try:
+            self.notebook.select(0)
+        except Exception:
+            pass
+        # Tell vis.js to highlight + zoom (no-op if not open)
+        try:
+            self._highlight_in_vis([node_id])
+        except Exception:
+            pass
+
+    # ---- Mermaid export --------------------------------------------------
+
+    def _export_mermaid_overview(self) -> None:
+        """Render a Mermaid flowchart of the graph (capped) and show it
+        in a copy-friendly dialog."""
+        if not self.graph:
+            messagebox.showwarning(
+                "No graph", "Load or build a graph first."
+            )
+            return
+        text = self._graph_to_mermaid(self.graph, max_nodes=30)
+        self._show_mermaid_dialog(text)
+
+    @staticmethod
+    def _safe_mermaid_id(s: str) -> str:
+        # Mermaid ids must be alphanumeric/_; squash everything else.
+        s = re.sub(r"\W+", "_", str(s))
+        return s[:50] or "n"
+
+    def _graph_to_mermaid(self, G, max_nodes: int = 30) -> str:
+        """Generate a `flowchart TD` block. Caps to `max_nodes` by degree
+        so the result stays readable when copied into a doc."""
+        if G.number_of_nodes() == 0:
+            return "flowchart TD\n    empty[No nodes]"
+        if G.number_of_nodes() > max_nodes:
+            top = sorted(G.degree, key=lambda x: -x[1])[:max_nodes]
+            keep = {n for n, _ in top}
+            G = G.subgraph(keep).copy()
+
+        lines = ["flowchart TD"]
+        for n, attrs in G.nodes(data=True):
+            label = str(attrs.get("label", n)).replace('"', "'")[:60]
+            lines.append(f'    {self._safe_mermaid_id(n)}["{label}"]')
+        for u, v, ed in G.edges(data=True):
+            rel = (ed.get("relation") or "").strip()
+            su, sv = self._safe_mermaid_id(u), self._safe_mermaid_id(v)
+            if rel:
+                lines.append(f"    {su} -->|{rel}| {sv}")
+            else:
+                lines.append(f"    {su} --> {sv}")
+        return "\n".join(lines)
+
+    def _show_mermaid_dialog(self, text: str) -> None:
+        from tkinter import Toplevel
+        win = Toplevel(self.root)
+        win.title("Mermaid flowchart")
+        win.geometry("680x520")
+        try:
+            win.configure(bg=PALETTE["bg"])
+        except Exception:
+            pass
+        ttk.Label(
+            win,
+            text=(
+                "Copy the block below and paste into a Mermaid renderer "
+                "(GitHub, mermaid.live, Notion, etc.)."
+            ),
+            style="Dim.TLabel",
+            wraplength=620,
+        ).pack(anchor="w", padx=12, pady=(12, 4))
+
+        body = ttk.Frame(win)
+        body.pack(fill=BOTH, expand=True, padx=12, pady=(0, 4))
+        txt = Text(
+            body,
+            wrap="none",
+            background=PALETTE["panel_alt"],
+            foreground=PALETTE["fg"],
+            font=self._mono_font,
+            relief="flat",
+            borderwidth=0,
+            padx=10,
+            pady=8,
+        )
+        sb_y = ttk.Scrollbar(body, orient="vertical", command=txt.yview)
+        sb_x = ttk.Scrollbar(body, orient="horizontal", command=txt.xview)
+        txt.configure(yscrollcommand=sb_y.set, xscrollcommand=sb_x.set)
+        sb_y.pack(side=RIGHT, fill="y")
+        sb_x.pack(side="bottom", fill="x")
+        txt.pack(side=LEFT, fill=BOTH, expand=True)
+        txt.insert("1.0", text)
+        txt.configure(state="normal")  # leave editable so the user can trim
+
+        bar = ttk.Frame(win)
+        bar.pack(fill="x", padx=12, pady=(4, 12))
+
+        def copy_to_clipboard():
+            self.root.clipboard_clear()
+            self.root.clipboard_append(txt.get("1.0", "end-1c"))
+            self.root.update()
+        ttk.Button(
+            bar, text="Copy to clipboard", style="Accent.TButton",
+            command=copy_to_clipboard,
+        ).pack(side=LEFT)
+        ttk.Button(bar, text="Close", command=win.destroy).pack(side=RIGHT)
 
     def _build_output_tab(self, parent: ttk.Frame) -> None:
         text_frame = ttk.Frame(parent, style="Panel.TFrame")
@@ -1688,6 +2038,11 @@ class GraphifyApp:
         # or stale by SHA).
         try:
             self._try_load_embed_index()
+        except Exception:
+            pass
+        # Populate the Browse tab (entry points + filesystem tree).
+        try:
+            self._refresh_browse_from_graph()
         except Exception:
             pass
 
