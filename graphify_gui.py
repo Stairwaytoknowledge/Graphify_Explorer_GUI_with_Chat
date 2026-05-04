@@ -713,20 +713,40 @@ class GraphifyApp:
             command=self._reset_focus_in_vis,
         ).pack(side=LEFT, padx=4)
 
-        # Quick legend / hints panel
-        hints = ttk.LabelFrame(parent, text="Tips")
-        hints.pack(fill="x", padx=10, pady=(4, 10))
-        ttk.Label(
-            hints,
-            text=(
-                "- Drag any node in the Interactive window to rearrange.\n"
-                "- Mouse-wheel zooms; click-drag empty area pans.\n"
-                "- Click a node to populate Details here.\n"
-                "- Browse / Insights tabs are clickable too - they\n"
-                "  light up the matching node in the Interactive window."
-            ),
-            style="Dim.TLabel", justify="left",
-        ).pack(anchor="w", padx=8, pady=6)
+        # Embed target: on Windows the vis.js subprocess gets reparented
+        # into this frame via SetParent. On macOS/Linux the subprocess
+        # opens as a separate window (this frame stays empty + shows a
+        # short note).
+        self.embed_frame = tk.Frame(
+            parent, bg=PALETTE["panel_alt"], width=600, height=400,
+        )
+        self.embed_frame.pack(fill=BOTH, expand=True, padx=10, pady=(4, 10))
+        self.embed_frame.pack_propagate(False)
+
+        if os.name != "nt":
+            ttk.Label(
+                self.embed_frame,
+                text=(
+                    "The Interactive Graph opens in a separate native\n"
+                    "window. Window-embedding is currently Windows-only;\n"
+                    "macOS/Linux will keep the popup behaviour."
+                ),
+                style="Dim.TLabel", justify="center",
+                background=PALETTE["panel_alt"],
+            ).pack(expand=True, padx=20, pady=20)
+        else:
+            self._embed_placeholder = tk.Label(
+                self.embed_frame,
+                text="Interactive Graph will appear here once a graph is loaded.",
+                bg=PALETTE["panel_alt"], fg=PALETTE["fg_dim"],
+            )
+            self._embed_placeholder.pack(expand=True)
+            # State for the embedded window.
+            self._vis_hwnd: int | None = None
+            self._embed_poll_count = 0
+            self.embed_frame.bind(
+                "<Configure>", self._on_embed_configure,
+            )
 
     def _build_right_pane(self, parent: ttk.Frame) -> None:
         # Always-visible query row at the top.
@@ -2651,6 +2671,143 @@ class GraphifyApp:
             self.viz_status_var.set(f"pywebview probe failed: {exc}")
             return
         self._open_interactive_view()
+        # On Windows: try to reparent the popup into the left-pane embed
+        # frame. Falls through silently if anything goes wrong (popup
+        # remains visible as a separate window in that case).
+        if os.name == "nt":
+            self._embed_poll_count = 0
+            self.root.after(500, self._embed_poll_tick)
+
+    # ---- Win32 window embedding (Windows-only) --------------------------
+    #
+    # The pywebview subprocess opens its own top-level window. We find it
+    # by title via EnumWindows, strip its decorations, and SetParent it
+    # into the Tk embed frame. Resize is forwarded via the embed frame's
+    # Configure event.
+
+    @staticmethod
+    def _find_window_by_title(substr: str) -> int | None:
+        if os.name != "nt":
+            return None
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        EnumWindowsProc = ctypes.WINFUNCTYPE(
+            wintypes.BOOL, wintypes.HWND, wintypes.LPARAM,
+        )
+        found = {"hwnd": None}
+
+        def cb(hwnd, _lparam):
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            buf = ctypes.create_unicode_buffer(512)
+            user32.GetWindowTextW(hwnd, buf, 512)
+            if substr.lower() in buf.value.lower():
+                found["hwnd"] = int(hwnd)
+                return False  # stop enumeration
+            return True
+
+        user32.EnumWindows(EnumWindowsProc(cb), 0)
+        return found["hwnd"]
+
+    def _embed_poll_tick(self) -> None:
+        """Poll for the vis.js window and embed it once it appears."""
+        if os.name != "nt":
+            return
+        if self._vis_hwnd is not None:
+            return  # already embedded
+        proc = getattr(self, "vis_proc", None)
+        if not proc or proc.poll() is not None:
+            return  # subprocess died; give up
+        self._embed_poll_count += 1
+        hwnd = self._find_window_by_title("Graphify - Interactive")
+        if hwnd:
+            try:
+                self._embed_hwnd_in_frame(hwnd)
+                self._vis_hwnd = hwnd
+                self.viz_status_var.set("Interactive Graph: embedded")
+                # Hide the placeholder text once embedded.
+                if hasattr(self, "_embed_placeholder"):
+                    try:
+                        self._embed_placeholder.pack_forget()
+                    except Exception:
+                        pass
+                return
+            except Exception as exc:
+                self.viz_status_var.set(
+                    f"embedding failed: {exc} - using popup window"
+                )
+                return
+        # Not yet up. Keep polling for ~15 seconds.
+        if self._embed_poll_count < 75:
+            self.root.after(200, self._embed_poll_tick)
+
+    def _embed_hwnd_in_frame(self, child_hwnd: int) -> None:
+        """Reparent `child_hwnd` into `self.embed_frame` and strip
+        decorations. Windows-only (caller checks os.name)."""
+        import ctypes
+        user32 = ctypes.windll.user32
+        GWL_STYLE       = -16
+        WS_CAPTION      = 0x00C00000
+        WS_THICKFRAME   = 0x00040000
+        WS_SYSMENU      = 0x00080000
+        WS_MINIMIZEBOX  = 0x00020000
+        WS_MAXIMIZEBOX  = 0x00010000
+        WS_CHILD        = 0x40000000
+        WS_VISIBLE      = 0x10000000
+        WS_POPUP        = 0x80000000
+        SWP_NOZORDER    = 0x0004
+        SWP_FRAMECHANGED = 0x0020
+        SWP_SHOWWINDOW  = 0x0040
+
+        # GetWindowLongPtrW / SetWindowLongPtrW are 64-bit safe; fall
+        # back to 32-bit variants if not present (very old Windows).
+        get_long = getattr(user32, "GetWindowLongPtrW", None) \
+            or user32.GetWindowLongW
+        set_long = getattr(user32, "SetWindowLongPtrW", None) \
+            or user32.SetWindowLongW
+
+        # Strip caption + thick frame + sys menu, set as child window.
+        style = get_long(child_hwnd, GWL_STYLE)
+        new_style = (
+            (style
+             & ~WS_CAPTION & ~WS_THICKFRAME & ~WS_SYSMENU
+             & ~WS_MINIMIZEBOX & ~WS_MAXIMIZEBOX & ~WS_POPUP)
+            | WS_CHILD | WS_VISIBLE
+        )
+        set_long(child_hwnd, GWL_STYLE, new_style)
+
+        # Reparent: SetParent(child, parent_hwnd_of_tk_frame).
+        parent_hwnd = self.embed_frame.winfo_id()
+        user32.SetParent(child_hwnd, parent_hwnd)
+
+        # Resize to fill the frame.
+        self.embed_frame.update_idletasks()
+        w = max(1, self.embed_frame.winfo_width())
+        h = max(1, self.embed_frame.winfo_height())
+        user32.SetWindowPos(
+            child_hwnd, 0, 0, 0, w, h,
+            SWP_FRAMECHANGED | SWP_NOZORDER | SWP_SHOWWINDOW,
+        )
+
+    def _on_embed_configure(self, event) -> None:
+        """Resize the embedded child to match the embed frame."""
+        if os.name != "nt":
+            return
+        hwnd = getattr(self, "_vis_hwnd", None)
+        if not hwnd:
+            return
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            SWP_NOZORDER = 0x0004
+            user32.SetWindowPos(
+                hwnd, 0, 0, 0, max(1, event.width), max(1, event.height),
+                SWP_NOZORDER,
+            )
+        except Exception:
+            pass
+
     # ---------------------------------------------------------- right panel
 
     def _set_detail_placeholder(self) -> None:
@@ -3062,9 +3219,22 @@ class GraphifyApp:
                         0, lambda i=nid: self._select_node_from_vis(i)
                     )
         # Subprocess exited.
-        self.root.after(
-            0, lambda: self._set_status("Interactive Graph: closed")
-        )
+        def _on_exit():
+            self._set_status("Interactive Graph: closed")
+            try:
+                self.viz_status_var.set("Interactive Graph: closed")
+            except Exception:
+                pass
+            # Clear embedded HWND state so a future _open_interactive_view
+            # can re-embed cleanly.
+            if hasattr(self, "_vis_hwnd"):
+                self._vis_hwnd = None
+            if hasattr(self, "_embed_placeholder"):
+                try:
+                    self._embed_placeholder.pack(expand=True)
+                except Exception:
+                    pass
+        self.root.after(0, _on_exit)
 
     def _select_node_from_vis(self, node_id: str) -> None:
         """Surface a node clicked in the vis.js window in the Details tab."""
