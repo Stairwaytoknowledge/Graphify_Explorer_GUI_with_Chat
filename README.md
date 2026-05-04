@@ -171,6 +171,98 @@ uses the Tk shipped with Python.
 `bash scripts/run_ci_locally.sh` runs the same checks on whatever OS
 you invoke it from.
 
+## Troubleshooting
+
+If the installer prints an error, the message above the error usually
+names the package that failed. The fixes below cover every error the
+installers can produce.
+
+### "dependency install failed" / "pip install failed"
+
+The installer needs to download four packages: `graphifyy`, `watchdog`,
+`numpy`, and `pywebview`. If any one fails to install, the installer
+stops with a clear message.
+
+**On all OSes:**
+
+1. **Check your internet connection** — the installer downloads from
+   PyPI. Behind a corporate proxy? Set `HTTPS_PROXY` first.
+2. **Check your Python version** — must be 3.10 or newer:
+   ```
+   python --version    (Windows)
+   python3 --version   (macOS / Linux)
+   ```
+   If older, install a newer Python from
+   <https://www.python.org/downloads/> and re-run the installer.
+3. **Try a clean venv** — delete the `.venv/` folder next to the
+   installer and run the installer again. Sometimes a half-installed
+   venv from a previous run gets stuck.
+
+### "pywebview not installed" / "Interactive Graph window doesn't open"
+
+The graph viewer uses `pywebview`, which needs a system-level webview
+component on each OS. The package itself is installed by the
+installer, but the system component isn't.
+
+**Windows** — needs Edge WebView2 (built into Windows 10 21H2 and newer):
+- Most Windows 10/11 machines already have it.
+- If it's missing, download the **Evergreen Standalone Installer**
+  from <https://developer.microsoft.com/microsoft-edge/webview2/>,
+  run it once, then re-run `Install-Windows.bat`.
+
+**macOS** — uses WKWebView (part of macOS):
+- Always present; if it fails to import, run:
+  ```
+  ./.venv/bin/pip install --force-reinstall pyobjc-core
+  ./.venv/bin/pip install --force-reinstall pywebview
+  ```
+- If you still hit issues, install Xcode Command Line Tools:
+  `xcode-select --install`.
+
+**Linux** — needs GTK WebKit 2:
+
+| Distro | Command |
+|---|---|
+| Debian / Ubuntu (24.04+) | `sudo apt install python3-gi gir1.2-webkit2-4.1` |
+| Debian / Ubuntu (older) | `sudo apt install python3-gi gir1.2-webkit2-4.0` |
+| Fedora | `sudo dnf install python3-gobject webkit2gtk4.0` |
+| Arch | `sudo pacman -S python-gobject webkit2gtk-4.1` |
+
+After installing the system package, re-run `bash install-linux.sh`.
+
+### "tkinter not found" (Linux only)
+
+Some distros split out the Tk bindings:
+
+| Distro | Command |
+|---|---|
+| Debian / Ubuntu | `sudo apt install python3-tk python3-venv` |
+| Fedora / RHEL | `sudo dnf install python3-tkinter` |
+| Arch | `sudo pacman -S tk` |
+
+### "graphify CLI not found" after a successful install
+
+Means the venv was created but `graphifyy` (which provides the CLI)
+didn't land. Inside the install folder:
+```
+.venv/bin/pip install graphifyy        (macOS / Linux)
+.venv\Scripts\pip install graphifyy    (Windows)
+```
+
+### Once it's working
+
+After a clean install:
+
+- **Windows**: double-click "Graphify Explorer" on the Desktop.
+- **macOS**: double-click `Graphify Explorer.app`.
+- **Linux**: launch from your apps menu, or double-click
+  `Graphify.sh`.
+
+The first time you load a graph, the Interactive Graph window appears
+in addition to the main GUI. The main GUI's left pane is the control
+panel for it; the right pane is tabs (Details / Browse / Insights /
+Chat / Output).
+
 ## Uninstall
 
 Nothing is installed system-wide. Delete this folder, then remove:

@@ -1,4 +1,12 @@
 graphifyy>=0.1
-matplotlib>=3.7
 # Required by `graphify watch` (file-system watcher).
 watchdog>=3.0
+# numpy is needed for our pure-numpy PageRank in the Insights tab.
+# (matplotlib used to pull this in; we no longer use matplotlib.)
+numpy>=1.24
+# Required for the Interactive Graph view (vis.js in a native webview).
+# - Windows uses Edge WebView2 (built into Windows 10+).
+# - macOS uses WKWebView (built into macOS).
+# - Linux needs GTK WebKit. On Debian/Ubuntu install:
+#       sudo apt install python3-gi gir1.2-webkit2-4.0
+pywebview>=6.0

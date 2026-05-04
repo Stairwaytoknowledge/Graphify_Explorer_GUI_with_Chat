@@ -41,29 +41,9 @@ from tkinter import (
     ttk,
 )
 
-# Optional deps. We import lazily so the GUI still opens (with a graceful
-# message in the graph pane) when matplotlib/networkx aren't installed.
-try:
-    import matplotlib
-
-    matplotlib.use("TkAgg")
-    import matplotlib.pyplot as plt
-    from matplotlib.backends.backend_tkagg import (
-        FigureCanvasTkAgg,
-        NavigationToolbar2Tk,
-    )
-    from matplotlib.figure import Figure
-
-    _MPL_OK = True
-except Exception as _mpl_err:
-    _MPL_OK = False
-
-try:
-    import networkx as nx
-
-    _NX_OK = True
-except Exception:
-    _NX_OK = False
+# Required: networkx (graphify itself depends on it, so it's always
+# available in the venv).
+import networkx as nx
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -643,11 +623,12 @@ class GraphifyApp:
         )
         ttk.Button(
             actions, text="Focus on Selected",
-            command=self._focus_on_selected,
+            command=self._focus_in_vis,
         ).pack(side=LEFT, padx=4)
-        ttk.Button(actions, text="Reset View", command=self._reset_focus).pack(
-            side=LEFT, padx=4
-        )
+        ttk.Button(
+            actions, text="Reset View",
+            command=self._reset_focus_in_vis,
+        ).pack(side=LEFT, padx=4)
         ttk.Button(actions, text="Open HTML", command=self._open_html).pack(
             side=LEFT, padx=4
         )
@@ -688,68 +669,64 @@ class GraphifyApp:
         )
 
     def _build_graph_pane(self, parent: ttk.Frame) -> None:
+        """Left pane: metadata + Interactive Graph control. The graph
+        itself renders in a separate vis.js window (auto-launched when
+        a graph loads)."""
         header = ttk.Label(parent, text="Knowledge Graph", style="Title.TLabel")
         header.pack(anchor="w", padx=10, pady=(8, 4))
+
         self.graph_meta_var = StringVar(
-            value="No graph loaded. Pick a folder and Build / Refresh."
+            value="No graph loaded. Pick a folder/URL above and Build."
         )
         ttk.Label(
-            parent, textvariable=self.graph_meta_var, style="Dim.TLabel"
-        ).pack(anchor="w", padx=10)
+            parent, textvariable=self.graph_meta_var, style="Dim.TLabel",
+            wraplength=420,
+        ).pack(anchor="w", padx=10, pady=(0, 8))
 
-        self.graph_container = ttk.Frame(parent, style="Panel.TFrame")
-        self.graph_container.pack(fill=BOTH, expand=True, padx=8, pady=8)
+        sep = ttk.Frame(parent, style="Panel.TFrame", height=1)
+        sep.pack(fill="x", padx=8, pady=(2, 8))
 
-        if not (_MPL_OK and _NX_OK):
-            ttk.Label(
-                self.graph_container,
-                text=(
-                    "matplotlib + networkx are required to render the graph "
-                    "in-app.\nReinstall via the installer or run\n"
-                    "    .venv/bin/pip install matplotlib networkx"
-                ),
-                style="Dim.TLabel",
-                justify="left",
-            ).pack(padx=20, pady=20)
-            self.figure = None
-            self.canvas = None
-            return
-
-        self.figure = Figure(figsize=(7, 5), dpi=100, facecolor=PALETTE["panel"])
-        self.ax = self.figure.add_subplot(111)
-        self._style_axes()
-        self.canvas = FigureCanvasTkAgg(self.figure, master=self.graph_container)
-        self.canvas.get_tk_widget().pack(fill=BOTH, expand=True)
-        toolbar = NavigationToolbar2Tk(self.canvas, parent, pack_toolbar=False)
-        toolbar.config(background=PALETTE["panel"])
-        for child in toolbar.winfo_children():
-            try:
-                child.config(background=PALETTE["panel"])
-            except Exception:
-                pass
-        toolbar.update()
-        toolbar.pack(fill="x", padx=8, pady=(0, 6))
-        self.canvas.mpl_connect("pick_event", self._on_pick)
-        # Mouse-wheel zoom centred on the cursor.
-        self.canvas.mpl_connect("scroll_event", self._on_scroll)
-        # Click-and-drag pan + hover tooltip share the motion event.
-        self.canvas.mpl_connect("motion_notify_event", self._on_motion)
-        self.canvas.mpl_connect("button_press_event", self._on_press)
-        self.canvas.mpl_connect("button_release_event", self._on_release)
-        # Pan drag state: None when not dragging, else
-        # (press_x_pixels, press_y_pixels, xlim_at_press, ylim_at_press).
-        self._pan_state: tuple | None = None
-        self._hover_annot = self.ax.annotate(
-            "", xy=(0, 0), xytext=(12, 12), textcoords="offset points",
-            color=PALETTE["fg"], fontsize=8,
-            bbox=dict(
-                boxstyle="round,pad=0.4",
-                fc=PALETTE["panel_alt"],
-                ec=PALETTE["accent"],
-                lw=0.8,
-            ),
-            visible=False, zorder=10,
+        self.viz_status_var = StringVar(
+            value="Interactive Graph: not started"
         )
+        ttk.Label(
+            parent, text="Interactive Graph window",
+            style="Title.TLabel",
+        ).pack(anchor="w", padx=10, pady=(2, 2))
+        ttk.Label(
+            parent, textvariable=self.viz_status_var,
+            style="Dim.TLabel", wraplength=420,
+        ).pack(anchor="w", padx=10, pady=(0, 6))
+
+        btn_row = ttk.Frame(parent, style="Panel.TFrame")
+        btn_row.pack(fill="x", padx=10, pady=(0, 10))
+        ttk.Button(
+            btn_row, text="Reopen Graph", style="Accent.TButton",
+            command=self._open_interactive_view,
+        ).pack(side=LEFT, padx=(0, 6))
+        ttk.Button(
+            btn_row, text="Focus on Selected (1-hop)",
+            command=self._focus_in_vis,
+        ).pack(side=LEFT, padx=4)
+        ttk.Button(
+            btn_row, text="Reset Focus",
+            command=self._reset_focus_in_vis,
+        ).pack(side=LEFT, padx=4)
+
+        # Quick legend / hints panel
+        hints = ttk.LabelFrame(parent, text="Tips")
+        hints.pack(fill="x", padx=10, pady=(4, 10))
+        ttk.Label(
+            hints,
+            text=(
+                "- Drag any node in the Interactive window to rearrange.\n"
+                "- Mouse-wheel zooms; click-drag empty area pans.\n"
+                "- Click a node to populate Details here.\n"
+                "- Browse / Insights tabs are clickable too - they\n"
+                "  light up the matching node in the Interactive window."
+            ),
+            style="Dim.TLabel", justify="left",
+        ).pack(anchor="w", padx=8, pady=6)
 
     def _build_right_pane(self, parent: ttk.Frame) -> None:
         # Always-visible query row at the top.
@@ -2531,15 +2508,6 @@ class GraphifyApp:
 
     # ---------------------------------------------------------- graph drawing
 
-    def _style_axes(self) -> None:
-        if not _MPL_OK:
-            return
-        self.ax.set_facecolor(PALETTE["panel"])
-        for spine in self.ax.spines.values():
-            spine.set_visible(False)
-        self.ax.set_xticks([])
-        self.ax.set_yticks([])
-
     def _graph_path(self) -> Path | None:
         path = self._selected_path(silent=True)
         if not path:
@@ -2547,8 +2515,6 @@ class GraphifyApp:
         return path / "graphify-out" / "graph.json"
 
     def _load_graph_into_view(self) -> None:
-        if not (_MPL_OK and _NX_OK):
-            return
         gp = self._graph_path()
         if not gp or not gp.exists():
             self.graph_meta_var.set(
@@ -2559,15 +2525,17 @@ class GraphifyApp:
             data = json.loads(gp.read_text(encoding="utf-8"))
             G = nx.node_link_graph(data, edges="links")
         except Exception as exc:
-            messagebox.showerror("Load failed", f"Could not parse graph.json:\n{exc}")
+            messagebox.showerror(
+                "Load failed",
+                f"Could not parse graph.json:\n{exc}",
+            )
             return
         self.graph = G
-        # Default meta - _render_graph may overwrite this with a cap notice.
         self.graph_meta_var.set(
-            f"{G.number_of_nodes()} nodes · {G.number_of_edges()} edges · "
-            f"loaded from {gp}"
+            f"{G.number_of_nodes()} nodes / {G.number_of_edges()} edges - "
+            f"loaded from {gp.name}"
         )
-        self._render_graph(G)
+
         # Try to attach a previously-built embedding index (no-op if missing
         # or stale by SHA).
         try:
@@ -2584,27 +2552,18 @@ class GraphifyApp:
             self._compute_insights(force=False)
         except Exception:
             pass
+        # Auto-launch the Interactive Graph window unless a vis subprocess
+        # is already running and pointing at the same graph.
+        try:
+            self._auto_launch_interactive_view()
+        except Exception:
+            pass
 
-    # Cap the inline matplotlib viewer at this many nodes. Beyond this the
-    # layout solvers get slow and labels turn into mush - point users at the
-    # upstream vis.js HTML instead.
-    MAX_INLINE_NODES = 300
-
-    # Per-relation edge styling. Anything not in this map falls back to
-    # the default "edge" color and a solid line.
-    EDGE_STYLES = {
-        "calls":     {"color": "#5ac6ff", "linestyle": "-",  "alpha": 0.85},
-        "imports":   {"color": "#7c5cff", "linestyle": "--", "alpha": 0.75},
-        "contains":  {"color": "#9aa6b8", "linestyle": ":",  "alpha": 0.55},
-        "inherits":  {"color": "#5fd38f", "linestyle": "-",  "alpha": 0.85},
-        "references":{"color": "#ffb454", "linestyle": "-.", "alpha": 0.75},
-    }
-    EDGE_DEFAULT = {"color": "#33415a", "linestyle": "-", "alpha": 0.65}
-
-    # ----- focus-mode drill-down -----------------------------------------
+    # ---- focus mode (delegates to vis.js subprocess via IPC) ------------
 
     def _n_hop_subgraph(self, center: str, hops: int):
-        """Return the subgraph induced by `center` and its <=hops neighbours."""
+        """Return the subgraph induced by `center` and its <=hops neighbours.
+        Used both for the vis.js focus IPC and the scoped Mermaid export."""
         if not self.graph or center not in self.graph:
             return None
         keep: set[str] = {center}
@@ -2620,358 +2579,78 @@ class GraphifyApp:
                 break
         return self.graph.subgraph(keep).copy()
 
-    def _focus_on_selected(self) -> None:
+    def _focus_in_vis(self) -> None:
+        """Tell the Interactive Graph window to focus the camera on the
+        selected node's 1-hop neighbourhood."""
         if not self.graph:
             messagebox.showwarning("No graph", "Load or build a graph first.")
             return
         if not self.selected_node:
             messagebox.showinfo(
                 "No selection",
-                "Click a node in the graph (or pick one in Browse / "
-                "Details) first, then 'Focus on Selected'.",
+                "Click a node (in Browse, Insights, or the Interactive "
+                "window) first, then 'Focus on Selected'.",
             )
             return
-        sub = self._n_hop_subgraph(self.selected_node, self.focus_hops)
+        sub = self._n_hop_subgraph(self.selected_node, 1)
         if sub is None or sub.number_of_nodes() == 0:
             messagebox.showinfo(
-                "Empty neighborhood",
-                "The selected node has no neighbors within "
-                f"{self.focus_hops} hops.",
+                "Empty",
+                "Selected node has no neighbours within 1 hop.",
             )
             return
-        self.focus_node_id = self.selected_node
-        self.graph_meta_var.set(
-            f"FOCUS: {self.selected_node} (+{self.focus_hops} hops) - "
-            f"{sub.number_of_nodes()} nodes, {sub.number_of_edges()} edges. "
-            f"Click 'Reset View' to return to the full graph."
-        )
-        self._render_graph(sub)
-
-    def _reset_focus(self) -> None:
-        if not self.graph:
-            return
-        if self.focus_node_id is None:
-            # Nothing was focused; just re-render full.
-            self._load_graph_into_view()
-            return
-        self.focus_node_id = None
-        self._load_graph_into_view()
-
-    def _render_graph(self, G) -> None:
-        # Reset the axes but preserve our hover annotation handle.
-        self.ax.clear()
-        self._style_axes()
-        # Re-attach hover annotation (cleared by ax.clear()).
-        self._hover_annot = self.ax.annotate(
-            "", xy=(0, 0), xytext=(12, 12), textcoords="offset points",
-            color=PALETTE["fg"], fontsize=8,
-            bbox=dict(
-                boxstyle="round,pad=0.4",
-                fc=PALETTE["panel_alt"],
-                ec=PALETTE["accent"],
-                lw=0.8,
-            ),
-            visible=False, zorder=10,
-        )
-
-        if G.number_of_nodes() == 0:
-            self.ax.text(
-                0.5, 0.5, "Empty graph",
-                color=PALETTE["fg_dim"],
-                ha="center", va="center", transform=self.ax.transAxes,
-            )
-            self.canvas.draw_idle()
-            return
-
-        full_nodes = G.number_of_nodes()
-        full_edges = G.number_of_edges()
-        capped = False
-        if full_nodes > self.MAX_INLINE_NODES:
-            capped = True
-            degrees = sorted(G.degree, key=lambda x: x[1], reverse=True)
-            keep = {n for n, _ in degrees[: self.MAX_INLINE_NODES]}
-            G = G.subgraph(keep).copy()
-
-        pos = nx.spring_layout(G, seed=7, k=None, iterations=80)
-
-        if capped:
-            self.graph_meta_var.set(
-                f"{full_nodes} nodes · {full_edges} edges · "
-                f"showing top {G.number_of_nodes()} by degree - "
-                f"click 'Open HTML' for the full visualization."
+        ids = [n for n in sub.nodes()]
+        if not self._vis_send({"cmd": "focus", "ids": ids}):
+            # Vis window not running; open it then queue the focus.
+            self._open_interactive_view()
+            self.root.after(
+                4500,
+                lambda i=ids: self._vis_send({"cmd": "focus", "ids": i}),
             )
 
-        # ---- Edges, grouped by relation so each style maps to one draw call.
-        edges_by_relation: dict[str, list[tuple]] = {}
-        for u, v, edata in G.edges(data=True):
-            rel = (edata or {}).get("relation", "default")
-            edges_by_relation.setdefault(rel, []).append((u, v))
+    def _reset_focus_in_vis(self) -> None:
+        if not self._vis_send({"cmd": "reset_focus"}):
+            return  # no vis window; nothing to reset
 
-        legend_handles_edges: list = []
-        for rel, edge_list in edges_by_relation.items():
-            style = self.EDGE_STYLES.get(rel, self.EDGE_DEFAULT)
-            xs_e: list[float] = []
-            ys_e: list[float] = []
-            for u, v in edge_list:
-                x0, y0 = pos[u]
-                x1, y1 = pos[v]
-                xs_e += [x0, x1, None]
-                ys_e += [y0, y1, None]
-            line, = self.ax.plot(
-                xs_e, ys_e,
-                color=style["color"],
-                linestyle=style["linestyle"],
-                linewidth=0.95,
-                alpha=style["alpha"],
-                zorder=1,
-                label=rel if rel != "default" else "(other)",
+    def _auto_launch_interactive_view(self) -> None:
+        """Spawn the Interactive Graph window if it isn't already up. Quiet
+        no-op if pywebview is missing - the user can click 'Reopen Graph'
+        and get the install hint message."""
+        proc = getattr(self, "vis_proc", None)
+        if proc and proc.poll() is None:
+            # Already running - just refresh the highlight.
+            return
+        # Defer slightly so the GUI's own paint settles first.
+        self.root.after(150, self._open_interactive_view_quiet)
+
+    def _open_interactive_view_quiet(self) -> None:
+        """Same as _open_interactive_view but swallows the 'pywebview not
+        installed' popup - we surface that in the left-pane status line
+        instead so the user isn't blocked by a modal."""
+        path = self._selected_path(silent=True)
+        if not path:
+            return
+        html = path / "graphify-out" / "graph.html"
+        if not html.exists():
+            self.viz_status_var.set(
+                "graph.html not found yet - run Build / Refresh"
             )
-            legend_handles_edges.append(line)
-
-        # ---- Nodes coloured by community, sized by degree, bordered by
-        # whether they look like a "god node" (top 5% degree).
-        keys = list(G.nodes())
-        xs = [pos[k][0] for k in keys]
-        ys = [pos[k][1] for k in keys]
-        degs = [G.degree(k) for k in keys]
-        max_deg = max(degs) if degs else 1
-        deg_threshold = sorted(degs, reverse=True)[max(0, len(degs) // 20)] if degs else 0
-
-        colors: list[str] = []
-        edge_colors: list[str] = []
-        edge_widths: list[float] = []
-        comm_set: set[int] = set()
-        for k in keys:
-            comm = int(G.nodes[k].get("community", 0) or 0)
-            comm_set.add(comm)
-            colors.append(COMMUNITY_COLORS[comm % len(COMMUNITY_COLORS)])
-            if G.degree(k) >= deg_threshold and deg_threshold > 0:
-                edge_colors.append(PALETTE["fg"])
-                edge_widths.append(1.4)
-            else:
-                edge_colors.append("#0b1220")
-                edge_widths.append(0.6)
-        sizes = [110 + 40 * d for d in degs]
-        self.node_artist = self.ax.scatter(
-            xs, ys,
-            c=colors, s=sizes,
-            edgecolors=edge_colors, linewidths=edge_widths,
-            picker=True, pickradius=8, zorder=3,
-        )
-        self.node_keys = keys
-        self.node_positions = pos
-
-        # ---- Labels (only when the cap is small enough to read)
-        if len(keys) <= 60:
-            for k in keys:
-                lbl = G.nodes[k].get("label", k)
-                self.ax.text(
-                    pos[k][0], pos[k][1] + 0.04,
-                    lbl,
-                    color=PALETTE["fg"],
-                    fontsize=8, ha="center", va="bottom", zorder=4,
+            return
+        try:
+            r = subprocess.run(
+                [sys.executable, "-c", "import webview"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if r.returncode != 0:
+                self.viz_status_var.set(
+                    "pywebview not installed; install via "
+                    "Install-*.bat / .command / .sh and reopen Graphify"
                 )
-
-        # ---- Legend: communities + edge types.
-        self._draw_legend(comm_set, list(edges_by_relation.keys()))
-
-        # ---- Cache axis limits so the zoom helper has a baseline to reset
-        # to, and stash the rendered subgraph for hover lookups.
-        self.ax.margins(0.10)
-        self._home_xlim = self.ax.get_xlim()
-        self._home_ylim = self.ax.get_ylim()
-        self._render_G = G
-        self.canvas.draw_idle()
-
-    def _draw_legend(self, comms: set[int], rels: list[str]) -> None:
-        """Two-section legend: community colors + edge relation styles."""
-        from matplotlib.lines import Line2D
-        from matplotlib.patches import Patch
-
-        handles: list = []
-        labels: list[str] = []
-        for c in sorted(comms)[:10]:
-            handles.append(
-                Patch(
-                    facecolor=COMMUNITY_COLORS[c % len(COMMUNITY_COLORS)],
-                    edgecolor="#0b1220",
-                )
-            )
-            labels.append(f"community {c}")
-        if len(comms) > 10:
-            handles.append(Patch(facecolor="none", edgecolor="none"))
-            labels.append(f"+{len(comms) - 10} more")
-        # blank row
-        if rels:
-            handles.append(Patch(facecolor="none", edgecolor="none"))
-            labels.append("")
-        for rel in rels:
-            style = self.EDGE_STYLES.get(rel, self.EDGE_DEFAULT)
-            handles.append(
-                Line2D(
-                    [0], [0],
-                    color=style["color"],
-                    linestyle=style["linestyle"],
-                    linewidth=2,
-                )
-            )
-            labels.append(rel if rel != "default" else "other")
-
-        leg = self.ax.legend(
-            handles, labels,
-            loc="upper right",
-            facecolor=PALETTE["panel_alt"],
-            edgecolor=PALETTE["panel_alt"],
-            labelcolor=PALETTE["fg"],
-            fontsize=8,
-            framealpha=0.9,
-            handlelength=1.8,
-        )
-        if leg:
-            for text in leg.get_texts():
-                text.set_color(PALETTE["fg"])
-
-    def _on_scroll(self, event) -> None:
-        """Zoom in/out on mouse wheel, centred on the cursor position."""
-        if event.inaxes != self.ax or event.xdata is None:
-            return
-        factor = 0.85 if event.button == "up" else 1.18
-        xlim = self.ax.get_xlim()
-        ylim = self.ax.get_ylim()
-        x, y = event.xdata, event.ydata
-        new_xlim = [x - (x - xlim[0]) * factor, x + (xlim[1] - x) * factor]
-        new_ylim = [y - (y - ylim[0]) * factor, y + (ylim[1] - y) * factor]
-        self.ax.set_xlim(new_xlim)
-        self.ax.set_ylim(new_ylim)
-        self.canvas.draw_idle()
-
-    # ----- pan drag --------------------------------------------------------
-
-    @staticmethod
-    def _is_left_button(event) -> bool:
-        """matplotlib reports button as int (old) or MouseButton enum (new).
-        Both compare equal to 1, but be defensive against weird backends."""
-        b = getattr(event, "button", None)
-        if b is None:
-            return False
-        try:
-            return int(b) == 1
-        except (TypeError, ValueError):
-            return str(b).lower() in ("1", "left", "mousebutton.left")
-
-    def _toolbar_mode_active(self) -> bool:
-        """If the user has toggled pan/zoom on the matplotlib toolbar, it
-        already handles drags - skip ours so they don't fight."""
-        try:
-            mode = getattr(self.canvas.toolbar, "mode", "")
-            return bool(mode)  # "" or "PAN/ZOOM" or "ZOOM"
-        except Exception:
-            return False
-
-    def _on_press(self, event) -> None:
-        """Start panning on left-click in empty area. Clicks on a node fall
-        through to pick_event for selection (no pan in that case)."""
-        if event.inaxes != self.ax:
-            return
-        if not self._is_left_button(event):
-            return
-        if self._toolbar_mode_active():
-            return
-        # If the click hits a node, let _on_pick handle it - don't pan.
-        if self.node_artist is not None:
-            try:
-                cont, _ = self.node_artist.contains(event)
-                if cont:
-                    return
-            except Exception:
-                pass
-        self._pan_state = (
-            event.x,
-            event.y,
-            self.ax.get_xlim(),
-            self.ax.get_ylim(),
-        )
-        try:
-            self.canvas.get_tk_widget().config(cursor="fleur")
-        except Exception:
-            pass
-
-    def _on_release(self, event) -> None:
-        if not self._is_left_button(event):
-            return
-        self._pan_state = None
-        try:
-            self.canvas.get_tk_widget().config(cursor="")
-        except Exception:
-            pass
-
-    def _on_motion(self, event) -> None:
-        """Routes to pan when dragging, otherwise to hover tooltip."""
-        # Pan path: convert pixel delta to data delta using press-time
-        # axis extents. Stays correct even when the limits shift mid-drag.
-        if self._pan_state is not None:
-            if event.x is None or event.y is None:
                 return
-            x_press, y_press, xlim, ylim = self._pan_state
-            bbox = self.ax.bbox
-            if bbox.width <= 0 or bbox.height <= 0:
-                return
-            dx_pixels = event.x - x_press
-            dy_pixels = event.y - y_press
-            dx_data = -(xlim[1] - xlim[0]) * dx_pixels / bbox.width
-            dy_data = -(ylim[1] - ylim[0]) * dy_pixels / bbox.height
-            self.ax.set_xlim(xlim[0] + dx_data, xlim[1] + dx_data)
-            self.ax.set_ylim(ylim[0] + dy_data, ylim[1] + dy_data)
-            # Hide hover tooltip while panning.
-            if self._hover_annot.get_visible():
-                self._hover_annot.set_visible(False)
-            self.canvas.draw_idle()
+        except Exception as exc:
+            self.viz_status_var.set(f"pywebview probe failed: {exc}")
             return
-
-        # Hover path
-        if not self.node_keys or self.node_artist is None:
-            return
-        if event.inaxes != self.ax:
-            if self._hover_annot.get_visible():
-                self._hover_annot.set_visible(False)
-                self.canvas.draw_idle()
-            return
-        cont, info = self.node_artist.contains(event)
-        if cont and "ind" in info and len(info["ind"]):
-            idx = int(info["ind"][0])
-            nid = self.node_keys[idx]
-            G = getattr(self, "_render_G", None) or self.graph
-            if G is None:
-                return
-            attrs = G.nodes.get(nid, {})
-            label = attrs.get("label", nid)
-            src = attrs.get("source_file", "?")
-            loc = attrs.get("source_location", "")
-            comm = attrs.get("community", "?")
-            text = (
-                f"{label}\n"
-                f"src: {src}{' ' + loc if loc else ''}\n"
-                f"community {comm} · degree {G.degree(nid)}"
-            )
-            x, y = self.node_positions[nid]
-            self._hover_annot.xy = (x, y)
-            self._hover_annot.set_text(text)
-            self._hover_annot.set_visible(True)
-            self.canvas.draw_idle()
-        elif self._hover_annot.get_visible():
-            self._hover_annot.set_visible(False)
-            self.canvas.draw_idle()
-
-    def _on_pick(self, event) -> None:
-        if not self.node_keys or event.artist is not self.node_artist:
-            return
-        ind = event.ind
-        if not len(ind):
-            return
-        key = self.node_keys[int(ind[0])]
-        self.selected_node = key
-        self._show_node_details(key)
-
+        self._open_interactive_view()
     # ---------------------------------------------------------- right panel
 
     def _set_detail_placeholder(self) -> None:

@@ -13,10 +13,10 @@ machine; rerun to refresh.
 
 | Step | Time | Notes |
 | ---- | ---- | ----- |
-| clone | 0.73 s | git clone --depth 1 |
-| graph build | 0.48 s | graphify update . - 202 nodes, 569 edges |
-| graph query (raw nodes) | 0.22 s | graphify query - 69 output lines, no natural-language answer |
-| chat answer (natural language, on-prem) | 11.80 s | Ollama qwen2.5:3b-instruct-q4_K_M - 132 words, answer: ItsDangerous in the context provided appears to be a library that handles cryptographic signatures and serialization. Based on the node clas... |
+| clone | 0.66 s | git clone --depth 1 |
+| graph build | 0.50 s | graphify update . - 202 nodes, 569 edges |
+| graph query (raw nodes) | 0.24 s | graphify query - 71 output lines, no natural-language answer |
+| chat answer (natural language, on-prem) | 5.88 s | Ollama qwen2.5:3b-instruct-q4_K_M - 132 words, answer: ItsDangerous appears to be a library for generating and verifying secure signatures and timestamps. The protection it offers is specifically... |
 
 Graph build time is the *control*: same engine either way, so
 the wrapper is neither faster nor slower at the engine work

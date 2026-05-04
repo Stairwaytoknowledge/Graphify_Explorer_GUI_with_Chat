@@ -27,14 +27,19 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v3
 
-      # Linux runners are headless and the GUI uses Tkinter - install
-      # the system Tk libs and a virtual X server so we can prove the
-      # window opens without a real display.
-      - name: Install Tk + Xvfb (Linux)
+      # Linux runners are headless and the GUI uses Tkinter; the graph
+      # viewer uses pywebview which on Linux needs GTK WebKit. Install
+      # all of: Tk, Xvfb, GTK Python bindings, and WebKit2 (4.1 on
+      # ubuntu-24.04, 4.0 on older runners - try both).
+      - name: Install Tk + Xvfb + GTK WebKit (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-tk xvfb
+          sudo apt-get install -y python3-tk xvfb python3-gi
+          # WebKit2 package name changed between Ubuntu releases.
+          sudo apt-get install -y gir1.2-webkit2-4.1 \
+            || sudo apt-get install -y gir1.2-webkit2-4.0 \
+            || echo "WARN: could not install GTK WebKit; pywebview may fail"
 
       - name: Run installer (Windows)
         if: runner.os == 'Windows'
