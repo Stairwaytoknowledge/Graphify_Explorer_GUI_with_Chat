@@ -93,6 +93,41 @@ JS_SHIM = r"""
         network.fit({ animation: { duration: 400 } });
     };
 
+    // Focus mode: hide all nodes outside `ids`, fit camera to the rest.
+    var _hidden_for_focus = null;
+    window.gx_focus_subgraph = function(ids) {
+        var keep = new Set(ids);
+        var updates = [];
+        var hidden = [];
+        network.body.data.nodes.forEach(function(n) {
+            if (!keep.has(n.id)) {
+                hidden.push(n.id);
+                updates.push({ id: n.id, hidden: true, physics: false });
+            } else {
+                // Make sure focused nodes are visible (they may have been
+                // hidden by a previous focus call).
+                updates.push({ id: n.id, hidden: false, physics: true });
+            }
+        });
+        if (hidden.length) {
+            _hidden_for_focus = hidden;
+            network.body.data.nodes.update(updates);
+            if (ids.length) {
+                network.fit({ nodes: ids, animation: { duration: 600 } });
+            }
+        }
+    };
+
+    window.gx_reset_focus = function() {
+        if (!_hidden_for_focus) return;
+        var updates = _hidden_for_focus.map(function(id) {
+            return { id: id, hidden: false, physics: true };
+        });
+        network.body.data.nodes.update(updates);
+        _hidden_for_focus = null;
+        network.fit({ animation: { duration: 600 } });
+    };
+
     network.on('selectNode', function(params) {
         if (params.nodes && params.nodes.length && window.pywebview) {
             window.pywebview.api.on_click(params.nodes[0]);
@@ -169,6 +204,16 @@ def main() -> int:
                 )
             elif cmd == "fit":
                 window.evaluate_js("window.gx_fit && gx_fit()")
+            elif cmd == "focus":
+                ids = msg.get("ids") or []
+                window.evaluate_js(
+                    f"window.gx_focus_subgraph && "
+                    f"gx_focus_subgraph({json.dumps(ids)})"
+                )
+            elif cmd == "reset_focus":
+                window.evaluate_js(
+                    "window.gx_reset_focus && gx_reset_focus()"
+                )
             elif cmd == "close":
                 window.destroy()
                 return

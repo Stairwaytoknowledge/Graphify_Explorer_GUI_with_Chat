@@ -40,13 +40,65 @@ else
     echo "[2/6] Created .venv/"
 fi
 
-# 3. Install graphifyy -------------------------------------------------------
-echo "[3/6] Installing graphifyy into .venv (this may take a minute)..."
+# 3. Install dependencies ----------------------------------------------------
+echo "[3/6] Installing dependencies (graphifyy, watchdog, numpy, pywebview)..."
 if [[ "$USE_UV" -eq 1 ]]; then
     uv pip install --python ".venv/bin/python" -r requirements.txt
+    rc=$?
 else
     ".venv/bin/python" -m pip install --upgrade pip >/dev/null
     ".venv/bin/python" -m pip install -r requirements.txt
+    rc=$?
+fi
+if [[ $rc -ne 0 ]]; then
+    cat <<'ERR'
+
+============================================================
+  ERROR: dependency install failed.
+============================================================
+
+What this means:
+  At least one required package could not be installed. The GUI
+  needs all of these to run:
+    - graphifyy   (the upstream graph engine)
+    - watchdog    (used by `graphify watch`)
+    - numpy       (used by the Insights tab's PageRank)
+    - pywebview   (powers the Interactive Graph window;
+                   uses the system's WKWebView on macOS)
+
+How to fix on macOS:
+  1. Make sure you have an internet connection (PyPI is needed).
+  2. Make sure Xcode Command Line Tools are installed:
+       xcode-select --install
+  3. If pywebview install fails specifically, try:
+       ./.venv/bin/pip install --upgrade pywebview
+  4. Re-run this installer. If it still fails, scroll up and read
+     the last few lines of pip's output - the missing package
+     name is usually right above the traceback.
+
+See README.md (Troubleshooting) for more options.
+
+ERR
+    read -r -p "Press Enter to close..." _
+    exit 1
+fi
+
+# Sanity check: pywebview must be importable.
+if ! ".venv/bin/python" -c "import webview" >/dev/null 2>&1; then
+    cat <<'ERR'
+
+============================================================
+  ERROR: pywebview installed but cannot be imported.
+============================================================
+  On macOS this usually means PyObjC didn't install cleanly.
+  Try:
+       ./.venv/bin/pip install --force-reinstall pyobjc-core
+       ./.venv/bin/pip install --force-reinstall pywebview
+  then re-run this installer.
+
+ERR
+    read -r -p "Press Enter to close..." _
+    exit 1
 fi
 
 # 4. Generate icon -----------------------------------------------------------

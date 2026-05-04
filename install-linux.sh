@@ -52,13 +52,86 @@ else
     echo "[2/5] Created .venv/"
 fi
 
-# 3. Install graphifyy -------------------------------------------------------
-echo "[3/5] Installing graphifyy into .venv..."
+# 3a. Pre-flight: GTK WebKit is needed for pywebview on Linux ---------------
+WEBKIT_OK=0
+if "$PY" -c "import gi; gi.require_version('WebKit2', '4.1'); from gi.repository import WebKit2" >/dev/null 2>&1 \
+   || "$PY" -c "import gi; gi.require_version('WebKit2', '4.0'); from gi.repository import WebKit2" >/dev/null 2>&1; then
+    WEBKIT_OK=1
+fi
+if [[ "$WEBKIT_OK" -eq 0 ]]; then
+    echo
+    echo "============================================================"
+    echo "  WARNING: GTK WebKit not detected."
+    echo "============================================================"
+    echo "  The Interactive Graph window needs GTK WebKit. Install it:"
+    echo "    Debian/Ubuntu:  sudo apt install python3-gi gir1.2-webkit2-4.0"
+    echo "    Fedora:         sudo dnf install python3-gobject webkit2gtk4.0"
+    echo "    Arch:           sudo pacman -S python-gobject webkit2gtk-4.1"
+    echo "  Then re-run this installer."
+    echo
+    echo "  The installer will continue anyway. The GUI will fail to"
+    echo "  open the graph viewer until WebKit is installed."
+    echo
+fi
+
+# 3b. Install dependencies ---------------------------------------------------
+echo "[3/5] Installing dependencies (graphifyy, watchdog, numpy, pywebview)..."
+set +e  # we want to handle the failure ourselves
 if [[ "$USE_UV" -eq 1 ]]; then
     uv pip install --python ".venv/bin/python" -r requirements.txt
+    rc=$?
 else
     ".venv/bin/python" -m pip install --upgrade pip >/dev/null
     ".venv/bin/python" -m pip install -r requirements.txt
+    rc=$?
+fi
+set -e
+if [[ $rc -ne 0 ]]; then
+    cat <<'ERR'
+
+============================================================
+  ERROR: dependency install failed.
+============================================================
+
+What this means:
+  At least one required package could not be installed. The GUI
+  needs all of these to run:
+    - graphifyy   (the upstream graph engine)
+    - watchdog    (used by `graphify watch`)
+    - numpy       (used by the Insights tab's PageRank)
+    - pywebview   (Interactive Graph window; needs GTK WebKit on Linux)
+
+How to fix on Linux:
+  1. Make sure system packages are installed:
+       Debian/Ubuntu:  sudo apt install python3-gi gir1.2-webkit2-4.0 python3-tk
+       Fedora:         sudo dnf install python3-gobject webkit2gtk4.0 python3-tkinter
+       Arch:           sudo pacman -S python-gobject webkit2gtk-4.1 tk
+  2. Make sure you have an internet connection (PyPI is needed).
+  3. Re-run this installer. If it still fails, scroll up and read
+     the last few lines of pip's output - the missing package
+     name is usually right above the traceback.
+
+See README.md (Troubleshooting) for more options.
+
+ERR
+    exit 1
+fi
+
+# Sanity check: pywebview must be importable.
+if ! ".venv/bin/python" -c "import webview" >/dev/null 2>&1; then
+    cat <<'ERR'
+
+============================================================
+  ERROR: pywebview installed but cannot be imported.
+============================================================
+  On Linux this almost always means GTK WebKit isn't installed.
+  Install it:
+    Debian/Ubuntu:  sudo apt install python3-gi gir1.2-webkit2-4.0
+    Fedora:         sudo dnf install python3-gobject webkit2gtk4.0
+    Arch:           sudo pacman -S python-gobject webkit2gtk-4.1
+
+ERR
+    exit 1
 fi
 
 # 4. Icon + .desktop entry --------------------------------------------------

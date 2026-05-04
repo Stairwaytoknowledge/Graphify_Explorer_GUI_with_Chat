@@ -63,20 +63,22 @@ if exist ".venv\Scripts\python.exe" (
     echo [2/5] Created .venv\
 )
 
-REM ---- Install graphifyy ----------------------------------------------------
-echo [3/5] Installing graphifyy into .venv (this may take a minute)...
+REM ---- Install graphifyy + watchdog + numpy + pywebview --------------------
+echo [3/5] Installing dependencies (graphifyy, watchdog, numpy, pywebview)...
+set "INSTALL_RC=0"
 if defined USE_UV (
     uv pip install --python ".venv\Scripts\python.exe" -r requirements.txt
+    set "INSTALL_RC=!errorlevel!"
 ) else (
     ".venv\Scripts\python.exe" -m pip install --upgrade pip >nul
     ".venv\Scripts\python.exe" -m pip install -r requirements.txt
+    set "INSTALL_RC=!errorlevel!"
 )
-if errorlevel 1 (
-    echo ERROR: pip install failed.
-    pause
-    popd
-    exit /b 1
-)
+if not "!INSTALL_RC!"=="0" goto :install_failed
+
+REM ---- Sanity check: pywebview must be importable ---------------------------
+".venv\Scripts\python.exe" -c "import webview" >nul 2>nul
+if errorlevel 1 goto :webview_failed
 
 REM ---- Generate icon --------------------------------------------------------
 echo [4/5] Generating icon...
@@ -116,3 +118,53 @@ if not defined CI if not defined NONINTERACTIVE pause
 popd
 endlocal
 exit /b 0
+
+REM =========================================================================
+REM Error handlers (jumped to via `goto`). Using labels avoids the cmd
+REM batch quirk where `(parens)` inside `if (...)` blocks confuse the
+REM parser when the error message itself contains parentheses.
+REM =========================================================================
+
+:install_failed
+echo.
+echo ============================================================
+echo   ERROR: dependency install failed.
+echo ============================================================
+echo.
+echo What this means:
+echo   At least one required package could not be installed. The GUI
+echo   needs all of these to run:
+echo     - graphifyy   ^(the upstream graph engine^)
+echo     - watchdog    ^(used by `graphify watch`^)
+echo     - numpy       ^(used by the Insights tab^)
+echo     - pywebview   ^(powers the Interactive Graph window^)
+echo.
+echo How to fix on Windows:
+echo   1. Make sure you have an internet connection ^(PyPI is needed^).
+echo   2. Make sure Edge WebView2 is installed ^(it is on Windows 10+ by
+echo      default; if it isn't, get it from
+echo      https://developer.microsoft.com/microsoft-edge/webview2/ ^).
+echo   3. Re-run this installer. If it still fails, scroll up and read
+echo      the last few lines of pip's output - the missing package
+echo      name is usually right above the traceback.
+echo.
+echo See README.md ^(Troubleshooting^) for more options.
+echo.
+if not defined CI if not defined NONINTERACTIVE pause
+popd
+endlocal
+exit /b 1
+
+:webview_failed
+echo.
+echo ============================================================
+echo   ERROR: pywebview installed but cannot be imported.
+echo ============================================================
+echo   This usually means Edge WebView2 is missing. Install it from:
+echo     https://developer.microsoft.com/microsoft-edge/webview2/
+echo   then re-run this installer.
+echo.
+if not defined CI if not defined NONINTERACTIVE pause
+popd
+endlocal
+exit /b 1
