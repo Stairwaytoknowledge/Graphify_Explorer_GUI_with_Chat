@@ -785,15 +785,18 @@ class GraphifyApp:
 
         details_tab = ttk.Frame(nb, style="Panel.TFrame")
         browse_tab = ttk.Frame(nb, style="Panel.TFrame")
+        insights_tab = ttk.Frame(nb, style="Panel.TFrame")
         chat_tab = ttk.Frame(nb, style="Panel.TFrame")
         output_tab = ttk.Frame(nb, style="Panel.TFrame")
         nb.add(details_tab, text="Details")
         nb.add(browse_tab, text="Browse")
+        nb.add(insights_tab, text="Insights")
         nb.add(chat_tab, text="Chat (local LLM)")
         nb.add(output_tab, text="Output")
 
         self._build_details_tab(details_tab)
         self._build_browse_tab(browse_tab)
+        self._build_insights_tab(insights_tab)
         self._build_chat_tab(chat_tab)
         self._build_output_tab(output_tab)
 
@@ -1275,6 +1278,411 @@ class GraphifyApp:
             command=copy_to_clipboard,
         ).pack(side=LEFT)
         ttk.Button(bar, text="Close", command=win.destroy).pack(side=RIGHT)
+
+    # ===== Insights tab ===================================================
+    #
+    # Auto-computed structural metrics (pure networkx, no LLM):
+    #   - top-N by PageRank, betweenness centrality
+    #   - articulation points (single-node SPOFs)
+    #   - bridges (single-edge SPOFs)
+    #   - simple cycles up to length 4
+    #   - modularity score on the existing community partition
+    # Cached to <repo>/graphify-out/insights.json keyed by SHA(graph.json).
+
+    INSIGHTS_FILE = "insights.json"
+
+    def _build_insights_tab(self, parent: ttk.Frame) -> None:
+        header = ttk.Frame(parent, style="Panel.TFrame")
+        header.pack(fill="x", padx=10, pady=(10, 4))
+        ttk.Label(header, text="Structural Insights", style="Title.TLabel").pack(
+            side=LEFT
+        )
+        self.insights_status_var = StringVar(value="(load a graph to compute)")
+        ttk.Label(
+            header, textvariable=self.insights_status_var,
+            style="Dim.TLabel",
+        ).pack(side=LEFT, padx=10)
+
+        ttk.Button(
+            header, text="Recompute",
+            command=lambda: self._compute_insights(force=True),
+        ).pack(side=RIGHT)
+
+        body = ttk.Frame(parent, style="Panel.TFrame")
+        body.pack(fill=BOTH, expand=True, padx=10, pady=(4, 10))
+        self.insights_text = Text(
+            body,
+            wrap="word",
+            background=PALETTE["panel_alt"],
+            foreground=PALETTE["fg"],
+            insertbackground=PALETTE["fg"],
+            relief="flat",
+            borderwidth=0,
+            padx=10,
+            pady=8,
+            cursor="arrow",
+        )
+        sb = ttk.Scrollbar(body, orient="vertical", command=self.insights_text.yview)
+        self.insights_text.configure(yscrollcommand=sb.set)
+        sb.pack(side=RIGHT, fill="y")
+        self.insights_text.pack(side=LEFT, fill=BOTH, expand=True)
+
+        # Tags for styled output + clickable nodes/edges
+        self.insights_text.tag_configure(
+            "section",
+            foreground=PALETTE["accent"],
+            font=(self._mono_font[0], 11, "bold"),
+            spacing3=4,
+        )
+        self.insights_text.tag_configure(
+            "summary", foreground=PALETTE["fg"], spacing3=6,
+        )
+        self.insights_text.tag_configure(
+            "dim", foreground=PALETTE["fg_dim"],
+        )
+        self.insights_text.tag_configure(
+            "node",
+            foreground=PALETTE["accent2"],
+            underline=True,
+        )
+        self.insights_text.tag_bind(
+            "node", "<Enter>",
+            lambda e: self.insights_text.config(cursor="hand2"),
+        )
+        self.insights_text.tag_bind(
+            "node", "<Leave>",
+            lambda e: self.insights_text.config(cursor="arrow"),
+        )
+
+        # Map (start_index, end_index) of each clickable span to a node id
+        self._insights_click_map: list[tuple[str, str, str]] = []
+        self.insights_text.tag_bind(
+            "node", "<Button-1>", self._on_insights_click,
+        )
+        self._set_insights_placeholder()
+
+        self.insights_thread: threading.Thread | None = None
+
+    def _set_insights_placeholder(self) -> None:
+        self.insights_text.configure(state=NORMAL)
+        self.insights_text.delete("1.0", END)
+        self.insights_text.insert(
+            END,
+            "Load a graph (Build / Refresh) and the insights compute "
+            "automatically. Cached to graphify-out/insights.json so "
+            "subsequent loads are instant.\n",
+            "dim",
+        )
+        self.insights_text.configure(state=DISABLED)
+
+    def _insights_path(self) -> Path | None:
+        path = self._selected_path(silent=True)
+        if not path:
+            return None
+        return path / "graphify-out" / self.INSIGHTS_FILE
+
+    def _compute_insights(self, force: bool = False) -> None:
+        """Trigger insights compute. Loads from cache when SHA matches and
+        not forced; otherwise spawns a background thread to compute fresh."""
+        if not self.graph:
+            return
+        if self.insights_thread and self.insights_thread.is_alive():
+            self.insights_status_var.set("Already computing - please wait...")
+            return
+        cache = self._insights_path()
+        if not cache:
+            return
+        gj = cache.parent / "graph.json"
+        if not gj.exists():
+            return
+        sha = _graph_sha(gj)
+        # Cache hit?
+        if not force and cache.exists():
+            try:
+                data = json.loads(cache.read_text(encoding="utf-8"))
+            except Exception:
+                data = None
+            if data and data.get("graph_sha") == sha:
+                self.insights_status_var.set(
+                    f"loaded from cache ({data.get('graph_sha', '')[:8]})"
+                )
+                self._render_insights(data)
+                return
+        # Cache miss - compute fresh in worker
+        self.insights_status_var.set("Computing insights...")
+        self.insights_thread = threading.Thread(
+            target=self._compute_insights_worker,
+            args=(sha, cache),
+            daemon=True,
+        )
+        self.insights_thread.start()
+
+    def _compute_insights_worker(self, sha: str, cache_path: Path) -> None:
+        try:
+            data = self._compute_insights_data(sha)
+        except Exception as exc:
+            self.root.after(
+                0,
+                lambda e=exc: self.insights_status_var.set(
+                    f"compute failed: {e}"
+                ),
+            )
+            return
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(
+                json.dumps(data, indent=2), encoding="utf-8",
+            )
+        except Exception:
+            pass  # cache failure is non-fatal
+        self.root.after(
+            0,
+            lambda: (
+                self.insights_status_var.set(
+                    f"computed in {data['_compute_secs']:.1f}s "
+                    f"(cached: {self.INSIGHTS_FILE})"
+                ),
+                self._render_insights(data),
+            ),
+        )
+
+    @staticmethod
+    def _pagerank_pure(G, alpha: float = 0.85,
+                        max_iter: int = 100, tol: float = 1e-6) -> dict:
+        """Pure-numpy PageRank. Avoids the scipy dep modern nx.pagerank
+        wants. Power iteration on a dense column-stochastic matrix; fine
+        up to a few thousand nodes."""
+        import numpy as np
+        nodes = list(G.nodes())
+        n = len(nodes)
+        if n == 0:
+            return {}
+        idx = {nid: i for i, nid in enumerate(nodes)}
+        M = np.zeros((n, n), dtype=np.float64)
+        for u, v in G.edges():
+            i, j = idx[u], idx[v]
+            M[j, i] += 1.0
+            if not G.is_directed():
+                M[i, j] += 1.0
+        col_sums = M.sum(axis=0)
+        # Dangling nodes (no out-edges) - distribute uniformly.
+        dangling = col_sums == 0
+        col_sums[dangling] = 1.0
+        M /= col_sums
+        if dangling.any():
+            M[:, dangling] = 1.0 / n
+        teleport = (1.0 - alpha) / n
+        pr = np.full(n, 1.0 / n, dtype=np.float64)
+        for _ in range(max_iter):
+            new_pr = alpha * (M @ pr) + teleport
+            if np.abs(new_pr - pr).sum() < tol:
+                pr = new_pr
+                break
+            pr = new_pr
+        return {nodes[i]: float(pr[i]) for i in range(n)}
+
+    def _compute_insights_data(self, graph_sha: str) -> dict:
+        """Pure networkx + numpy. Heavy: betweenness is O(V*E), expect
+        a few seconds on a ~1500-node graph."""
+        import time as _t
+        t0 = _t.time()
+        G = self.graph
+        N, E = G.number_of_nodes(), G.number_of_edges()
+
+        # PageRank using our pure-numpy implementation.
+        pr = self._pagerank_pure(G)
+        pr_top = sorted(pr.items(), key=lambda x: -x[1])[:10]
+
+        # Betweenness centrality. Approximated for speed on large graphs.
+        if N > 800:
+            btw = nx.betweenness_centrality(G, k=200, seed=7, normalized=True)
+        else:
+            btw = nx.betweenness_centrality(G, normalized=True)
+        btw_top = sorted(btw.items(), key=lambda x: -x[1])[:10]
+
+        # Articulation points + bridges work on undirected.
+        UG = G.to_undirected() if G.is_directed() else G
+        articulation = list(nx.articulation_points(UG))
+        bridges = list(nx.bridges(UG))
+
+        # Short cycles via cycle_basis (undirected) - keep <=4
+        try:
+            cb = nx.cycle_basis(UG)
+            short_cycles = [c for c in cb if 3 <= len(c) <= 4][:30]
+        except Exception:
+            short_cycles = []
+
+        # Modularity over existing community partition.
+        modularity_score = None
+        try:
+            buckets: dict[int, list[str]] = {}
+            for n, a in G.nodes(data=True):
+                c = a.get("community")
+                if c is None:
+                    continue
+                buckets.setdefault(int(c), []).append(n)
+            comms = [set(v) for v in buckets.values() if v]
+            if comms:
+                modularity_score = nx.community.modularity(UG, comms)
+        except Exception:
+            modularity_score = None
+
+        density = nx.density(UG)
+        components = sorted(
+            (len(c) for c in nx.connected_components(UG)),
+            reverse=True,
+        )[:10]
+
+        def label(n: str) -> str:
+            return G.nodes[n].get("label", n)
+
+        return {
+            "graph_sha": graph_sha,
+            "n_nodes": N,
+            "n_edges": E,
+            "density": float(density),
+            "components_top": components,
+            "modularity": modularity_score,
+            "pagerank_top": [
+                {"id": n, "label": label(n), "score": float(s)}
+                for n, s in pr_top
+            ],
+            "betweenness_top": [
+                {"id": n, "label": label(n), "score": float(s)}
+                for n, s in btw_top
+            ],
+            "articulation_points": [
+                {"id": n, "label": label(n)} for n in articulation[:30]
+            ],
+            "bridges": [
+                {"a": u, "b": v, "label_a": label(u), "label_b": label(v)}
+                for u, v in bridges[:30]
+            ],
+            "short_cycles": [
+                [{"id": n, "label": label(n)} for n in cyc]
+                for cyc in short_cycles
+            ],
+            "_compute_secs": float(_t.time() - t0),
+        }
+
+    def _render_insights(self, data: dict) -> None:
+        self._insights_click_map = []
+        self.insights_text.configure(state=NORMAL)
+        self.insights_text.delete("1.0", END)
+
+        # ----- summary -----
+        N = data.get("n_nodes", 0)
+        E = data.get("n_edges", 0)
+        dens = data.get("density", 0.0)
+        mod = data.get("modularity")
+        comps = data.get("components_top", [])
+        summary = (
+            f"{N} nodes, {E} edges, density {dens:.4f}\n"
+            f"Connected components (top sizes): "
+            f"{', '.join(str(s) for s in comps) or '(none)'}\n"
+        )
+        if mod is not None:
+            summary += f"Modularity of community partition: {mod:.3f}\n"
+        self._insights_section("Summary", summary)
+
+        # ----- top by PageRank -----
+        self._insights_section_header("Top 10 by PageRank")
+        for r in data.get("pagerank_top", []):
+            self._insights_clickable_node(
+                f"  {r['score']:.4f}  ", r["id"], r["label"],
+            )
+            self.insights_text.insert(END, "\n")
+
+        # ----- top by betweenness -----
+        self._insights_section_header("Top 10 by betweenness centrality")
+        for r in data.get("betweenness_top", []):
+            self._insights_clickable_node(
+                f"  {r['score']:.4f}  ", r["id"], r["label"],
+            )
+            self.insights_text.insert(END, "\n")
+
+        # ----- articulation points -----
+        ap = data.get("articulation_points", [])
+        self._insights_section_header(
+            f"Articulation points ({len(ap)} total) - removing one of these "
+            "disconnects part of the graph"
+        )
+        if not ap:
+            self.insights_text.insert(END, "  (none)\n", "dim")
+        for r in ap[:20]:
+            self._insights_clickable_node("  ", r["id"], r["label"])
+            self.insights_text.insert(END, "\n")
+        if len(ap) > 20:
+            self.insights_text.insert(
+                END, f"  ... +{len(ap) - 20} more\n", "dim",
+            )
+
+        # ----- bridges -----
+        br = data.get("bridges", [])
+        self._insights_section_header(
+            f"Bridges ({len(br)} total) - critical edges; removing one "
+            "disconnects part of the graph"
+        )
+        if not br:
+            self.insights_text.insert(END, "  (none)\n", "dim")
+        for r in br[:20]:
+            self.insights_text.insert(END, "  ")
+            self._insights_clickable_node("", r["a"], r["label_a"])
+            self.insights_text.insert(END, "  -->  ")
+            self._insights_clickable_node("", r["b"], r["label_b"])
+            self.insights_text.insert(END, "\n")
+        if len(br) > 20:
+            self.insights_text.insert(
+                END, f"  ... +{len(br) - 20} more\n", "dim",
+            )
+
+        # ----- short cycles -----
+        cycs = data.get("short_cycles", [])
+        self._insights_section_header(
+            f"Short cycles ({len(cycs)} of length 3-4) - circular dependencies"
+        )
+        if not cycs:
+            self.insights_text.insert(END, "  (none)\n", "dim")
+        for cyc in cycs[:15]:
+            self.insights_text.insert(END, "  ")
+            for i, item in enumerate(cyc):
+                self._insights_clickable_node("", item["id"], item["label"])
+                if i < len(cyc) - 1:
+                    self.insights_text.insert(END, " -> ")
+            self.insights_text.insert(END, "\n")
+        if len(cycs) > 15:
+            self.insights_text.insert(
+                END, f"  ... +{len(cycs) - 15} more\n", "dim",
+            )
+
+        self.insights_text.configure(state=DISABLED)
+
+    def _insights_section(self, title: str, body: str) -> None:
+        self.insights_text.insert(END, f"{title}\n", "section")
+        self.insights_text.insert(END, body, "summary")
+        self.insights_text.insert(END, "\n")
+
+    def _insights_section_header(self, title: str) -> None:
+        self.insights_text.insert(END, f"\n{title}\n", "section")
+
+    def _insights_clickable_node(
+        self, prefix: str, node_id: str, label: str
+    ) -> None:
+        if prefix:
+            self.insights_text.insert(END, prefix)
+        start = self.insights_text.index(END + "-1c")
+        self.insights_text.insert(END, label, "node")
+        end = self.insights_text.index(END + "-1c")
+        # Track this span for click dispatch.
+        self._insights_click_map.append((start, end, node_id))
+
+    def _on_insights_click(self, event) -> None:
+        idx = self.insights_text.index(f"@{event.x},{event.y}")
+        for start, end, nid in self._insights_click_map:
+            if self.insights_text.compare(start, "<=", idx) and \
+               self.insights_text.compare(idx, "<", end):
+                self._select_and_highlight_node(nid)
+                return
 
     def _build_output_tab(self, parent: ttk.Frame) -> None:
         text_frame = ttk.Frame(parent, style="Panel.TFrame")
@@ -2169,6 +2577,11 @@ class GraphifyApp:
         # Populate the Browse tab (entry points + filesystem tree).
         try:
             self._refresh_browse_from_graph()
+        except Exception:
+            pass
+        # Trigger insights compute (cached if SHA matches; else background).
+        try:
+            self._compute_insights(force=False)
         except Exception:
             pass
 
