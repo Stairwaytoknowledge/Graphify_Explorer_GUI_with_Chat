@@ -460,6 +460,10 @@ class GraphifyApp:
         self.node_artist = None
         self.node_keys: list[str] = []
         self.selected_node: str | None = None
+        # Focus mode: when set, the matplotlib pane shows only the
+        # N-hop neighborhood of this node.
+        self.focus_node_id: str | None = None
+        self.focus_hops: int = 2
         # Job tracking for elapsed-time display + completion alerts.
         self._job_start: float | None = None
         self._job_label: str = ""
@@ -635,6 +639,13 @@ class GraphifyApp:
         ).pack(side=LEFT, padx=(0, 6))
         ttk.Button(actions, text="Watch", command=self._watch).pack(side=LEFT, padx=4)
         ttk.Button(actions, text="Reload View", command=self._load_graph_into_view).pack(
+            side=LEFT, padx=4
+        )
+        ttk.Button(
+            actions, text="Focus on Selected",
+            command=self._focus_on_selected,
+        ).pack(side=LEFT, padx=4)
+        ttk.Button(actions, text="Reset View", command=self._reset_focus).pack(
             side=LEFT, padx=4
         )
         ttk.Button(actions, text="Open HTML", command=self._open_html).pack(
@@ -1057,15 +1068,130 @@ class GraphifyApp:
     # ---- Mermaid export --------------------------------------------------
 
     def _export_mermaid_overview(self) -> None:
-        """Render a Mermaid flowchart of the graph (capped) and show it
-        in a copy-friendly dialog."""
+        """Open a scope chooser, then render the chosen subgraph as
+        Mermaid and show it in a copy-friendly dialog."""
         if not self.graph:
             messagebox.showwarning(
                 "No graph", "Load or build a graph first."
             )
             return
-        text = self._graph_to_mermaid(self.graph, max_nodes=30)
-        self._show_mermaid_dialog(text)
+        self._show_mermaid_scope_dialog()
+
+    def _show_mermaid_scope_dialog(self) -> None:
+        """Pick: full graph / single community / single file /
+        selected node's neighborhood."""
+        from tkinter import Toplevel
+        win = Toplevel(self.root)
+        win.title("Mermaid: choose scope")
+        win.geometry("520x300")
+        try:
+            win.configure(bg=PALETTE["bg"])
+        except Exception:
+            pass
+        ttk.Label(
+            win, text="What should the diagram show?",
+            style="Title.TLabel",
+        ).pack(anchor="w", padx=14, pady=(14, 8))
+
+        scope_var = StringVar(value="full")
+        for value, text in [
+            ("full",  "Full graph (capped to top 30 by degree)"),
+            ("comm",  "One community (high-level subsystem)"),
+            ("file",  "One file (functions inside it)"),
+            ("nbhd",  "Selected node's 1-hop neighborhood"),
+        ]:
+            ttk.Radiobutton(
+                win, text=text, variable=scope_var, value=value,
+            ).pack(anchor="w", padx=24, pady=2)
+
+        # Optional argument input
+        arg_var = StringVar()
+        arg_label = ttk.Label(
+            win,
+            text="Argument (community id for 'community', file path for 'file' - leave blank for 'full' / 'nbhd')",
+            style="Dim.TLabel", wraplength=480,
+        )
+        arg_label.pack(anchor="w", padx=14, pady=(10, 2))
+        ttk.Entry(win, textvariable=arg_var).pack(
+            fill="x", padx=14, pady=(0, 8)
+        )
+
+        bar = ttk.Frame(win)
+        bar.pack(fill="x", padx=14, pady=(8, 14))
+
+        def on_ok():
+            scope = scope_var.get()
+            arg = arg_var.get().strip()
+            sub = self._mermaid_subgraph_for_scope(scope, arg)
+            if sub is None:
+                return  # error already shown
+            text = self._graph_to_mermaid(sub, max_nodes=40)
+            win.destroy()
+            self._show_mermaid_dialog(text)
+
+        ttk.Button(
+            bar, text="Generate", style="Accent.TButton", command=on_ok,
+        ).pack(side=LEFT)
+        ttk.Button(bar, text="Cancel", command=win.destroy).pack(side=RIGHT)
+
+    def _mermaid_subgraph_for_scope(self, scope: str, arg: str):
+        """Resolve a scope string + arg to a networkx subgraph.
+        Shows a messagebox and returns None on error."""
+        G = self.graph
+        if scope == "full":
+            return G
+        if scope == "nbhd":
+            if not self.selected_node:
+                messagebox.showwarning(
+                    "No selection", "Pick a node first (Browse / Details)."
+                )
+                return None
+            sub = self._n_hop_subgraph(self.selected_node, 1)
+            if sub is None or sub.number_of_nodes() == 0:
+                messagebox.showinfo(
+                    "Empty", "Selected node has no neighbors."
+                )
+                return None
+            return sub
+        if scope == "comm":
+            if not arg.isdigit():
+                messagebox.showwarning(
+                    "Need community id",
+                    "Enter the community number (an integer). "
+                    "Hover the matplotlib legend or check the Details "
+                    "tab to find one.",
+                )
+                return None
+            cid = int(arg)
+            keep = [
+                n for n, a in G.nodes(data=True)
+                if int(a.get("community", -1) or -1) == cid
+            ]
+            if not keep:
+                messagebox.showinfo(
+                    "Empty", f"No nodes in community {cid}."
+                )
+                return None
+            return G.subgraph(keep).copy()
+        if scope == "file":
+            if not arg:
+                messagebox.showwarning(
+                    "Need file path",
+                    "Enter the file path (e.g. src/click/core.py)."
+                )
+                return None
+            arg_norm = arg.replace("\\", "/")
+            keep = [
+                n for n, a in G.nodes(data=True)
+                if (a.get("source_file") or "").replace("\\", "/") == arg_norm
+            ]
+            if not keep:
+                messagebox.showinfo(
+                    "Empty", f"No graph nodes found for file {arg}."
+                )
+                return None
+            return G.subgraph(keep).copy()
+        return None
 
     @staticmethod
     def _safe_mermaid_id(s: str) -> str:
@@ -2062,6 +2188,62 @@ class GraphifyApp:
     }
     EDGE_DEFAULT = {"color": "#33415a", "linestyle": "-", "alpha": 0.65}
 
+    # ----- focus-mode drill-down -----------------------------------------
+
+    def _n_hop_subgraph(self, center: str, hops: int):
+        """Return the subgraph induced by `center` and its <=hops neighbours."""
+        if not self.graph or center not in self.graph:
+            return None
+        keep: set[str] = {center}
+        frontier = {center}
+        for _ in range(max(0, hops)):
+            next_frontier: set[str] = set()
+            for n in frontier:
+                next_frontier.update(self.graph.neighbors(n))
+            next_frontier -= keep
+            keep |= next_frontier
+            frontier = next_frontier
+            if not frontier:
+                break
+        return self.graph.subgraph(keep).copy()
+
+    def _focus_on_selected(self) -> None:
+        if not self.graph:
+            messagebox.showwarning("No graph", "Load or build a graph first.")
+            return
+        if not self.selected_node:
+            messagebox.showinfo(
+                "No selection",
+                "Click a node in the graph (or pick one in Browse / "
+                "Details) first, then 'Focus on Selected'.",
+            )
+            return
+        sub = self._n_hop_subgraph(self.selected_node, self.focus_hops)
+        if sub is None or sub.number_of_nodes() == 0:
+            messagebox.showinfo(
+                "Empty neighborhood",
+                "The selected node has no neighbors within "
+                f"{self.focus_hops} hops.",
+            )
+            return
+        self.focus_node_id = self.selected_node
+        self.graph_meta_var.set(
+            f"FOCUS: {self.selected_node} (+{self.focus_hops} hops) - "
+            f"{sub.number_of_nodes()} nodes, {sub.number_of_edges()} edges. "
+            f"Click 'Reset View' to return to the full graph."
+        )
+        self._render_graph(sub)
+
+    def _reset_focus(self) -> None:
+        if not self.graph:
+            return
+        if self.focus_node_id is None:
+            # Nothing was focused; just re-render full.
+            self._load_graph_into_view()
+            return
+        self.focus_node_id = None
+        self._load_graph_into_view()
+
     def _render_graph(self, G) -> None:
         # Reset the axes but preserve our hover annotation handle.
         self.ax.clear()
@@ -2389,6 +2571,22 @@ class GraphifyApp:
         )
         self.detail_text.configure(state=DISABLED)
 
+    def _node_breadcrumb(self, key: str) -> str:
+        """Render a path-style breadcrumb: Codebase > dir/ > file > label."""
+        if not self.graph or key not in self.graph:
+            return "Codebase"
+        attrs = self.graph.nodes[key]
+        src = (attrs.get("source_file") or "").replace("\\", "/")
+        label = attrs.get("label") or key
+        parts = ["Codebase"]
+        if src:
+            segs = src.split("/")
+            for d in segs[:-1]:
+                parts.append(d + "/")
+            parts.append(segs[-1])
+        parts.append(label)
+        return "  >  ".join(parts)
+
     def _show_node_details(self, key: str) -> None:
         if not self.graph:
             return
@@ -2405,9 +2603,11 @@ class GraphifyApp:
             edata = self.graph.get_edge_data(key, n) or {}
             rel = edata.get("relation", "?")
             conf = edata.get("confidence", "")
-            rels.append(f"  • {rel:<10} → {self.graph.nodes[n].get('label', n)} [{conf}]")
+            rels.append(f"  - {rel:<10} -> {self.graph.nodes[n].get('label', n)} [{conf}]")
 
         lines = [
+            self._node_breadcrumb(key),
+            "",
             f"Label:     {label}",
             f"Type:      {ftype}",
             f"Source:    {src}{(' ' + loc) if loc else ''}",
