@@ -3123,14 +3123,16 @@ class GraphifyApp:
     # ---- interactive (vis.js via pywebview subprocess) -------------------
 
     def _open_interactive_view(self) -> None:
-        """Spawn graphify_vis_window.py as a subprocess pointing at the
-        upstream graph.html. Communicate via newline-delimited JSON on
-        stdin/stdout. The matplotlib pane is unaffected."""
+        """Open the Interactive Graph, or - if it's already running -
+        reset its state to the full graph view (clear focus + highlight
+        + fit camera). The 'Reopen Graph' button uses this so it works
+        as an unstick / reset whether the window is closed or not."""
         if getattr(self, "vis_proc", None) and self.vis_proc.poll() is None:
-            messagebox.showinfo(
-                "Already open",
-                "Interactive Graph window is already running.",
-            )
+            # Already running: act as a "reset to full view".
+            self._vis_send({"cmd": "reset_focus"})
+            self._vis_send({"cmd": "clear_highlight"})
+            self._vis_send({"cmd": "fit"})
+            self.viz_status_var.set("Interactive Graph: reset to full view")
             return
         path = self._selected_path()
         if not path:
