@@ -165,7 +165,10 @@ PAGE_HTML = f"""<!doctype html>
 
   window.addEventListener('load', function () {{
     setStatus('ready');
-    if (window.pywebview) window.pywebview.api.on_ready();
+    // NOTE: don't call pywebview.api.on_ready() here. At window 'load'
+    // pywebview's bridge may not yet be injected. The Python side calls
+    // on_ready from its own on_loaded hook (which fires after the bridge
+    // is ready), so this listener only needs to update the status text.
   }});
 </script>
 </body>
@@ -227,6 +230,18 @@ def main() -> int:
                 return
 
     def on_loaded():
+        # pywebview calls this AFTER the page is fully loaded AND the
+        # JS bridge is injected, so window.pywebview.api is guaranteed
+        # to exist here. Signal ready from this side (more reliable
+        # than the page's own 'load' event, which can fire before the
+        # bridge is set up).
+        try:
+            window.evaluate_js(
+                "if (window.pywebview && window.pywebview.api) "
+                "window.pywebview.api.on_ready();"
+            )
+        except Exception:
+            pass
         threading.Thread(target=stdin_loop, daemon=True).start()
 
     webview.start(on_loaded, debug=False)

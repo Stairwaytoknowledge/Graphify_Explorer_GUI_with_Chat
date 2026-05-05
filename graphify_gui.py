@@ -1834,6 +1834,10 @@ class GraphifyApp:
         self._last_mermaid_text: str = ""
         self._mermaid_pending_text: str | None = None
         self._mermaid_debounce_after: str | None = None
+        # We can only call the JS gx_render() once the subprocess emits
+        # `ready` (which fires after mermaid.js finishes loading). Until
+        # then every send is queued; the queue flushes on ready.
+        self._mermaid_ready: bool = False
 
     # ---- subprocess lifecycle -------------------------------------------
 
@@ -1889,13 +1893,12 @@ class GraphifyApp:
                 continue
             ev = msg.get("event")
             if ev == "ready":
-                self.root.after(
-                    0,
-                    lambda: self.mermaid_status_var.set("ready"),
-                )
-                # Render any pending text now that we're up.
-                if self._mermaid_pending_text:
-                    self.root.after(0, self._mermaid_flush_pending)
+                # Mermaid.js is loaded and gx_render is defined.
+                def _on_ready():
+                    self._mermaid_ready = True
+                    self.mermaid_status_var.set("ready")
+                    self._mermaid_flush_pending()
+                self.root.after(0, _on_ready)
             elif ev == "rendered":
                 ok = msg.get("ok")
                 err = msg.get("error", "")
@@ -1908,6 +1911,7 @@ class GraphifyApp:
         # subprocess exited
         def _on_exit():
             self.mermaid_status_var.set("Mermaid renderer closed")
+            self._mermaid_ready = False
             if hasattr(self, "_mermaid_hwnd"):
                 self._mermaid_hwnd = None
             if hasattr(self, "_mermaid_placeholder"):
@@ -1919,8 +1923,19 @@ class GraphifyApp:
 
     def _mermaid_send_text(self, text: str) -> None:
         proc = getattr(self, "mermaid_proc", None)
-        if not proc or proc.poll() is not None or not proc.stdin:
-            # Not running - queue the text and let the spawn handle render.
+        # Two reasons to queue instead of send right now:
+        #   1. Subprocess isn't running yet -> spawn will read the queue
+        #      after the page emits `ready`.
+        #   2. Subprocess IS running but the page hasn't finished loading
+        #      mermaid.js yet -> sending now would no-op (gx_render isn't
+        #      defined). The first click after a fresh launch hits this
+        #      window. Queue the text; flush on `ready`.
+        if (
+            not proc
+            or proc.poll() is not None
+            or not proc.stdin
+            or not self._mermaid_ready
+        ):
             self._mermaid_pending_text = text
             return
         try:
@@ -3093,6 +3108,12 @@ class GraphifyApp:
             self._auto_launch_interactive_view()
         except Exception:
             pass
+        # Pre-warm the Mermaid subprocess too so the first node-click
+        # doesn't have to wait ~1-2s for mermaid.js to load.
+        try:
+            self._auto_launch_mermaid_view()
+        except Exception:
+            pass
 
     # ---- focus mode (delegates to vis.js subprocess via IPC) ------------
 
@@ -3157,6 +3178,20 @@ class GraphifyApp:
             return
         # Defer slightly so the GUI's own paint settles first.
         self.root.after(150, self._open_interactive_view_quiet)
+
+    def _auto_launch_mermaid_view(self) -> None:
+        """Pre-warm the Mermaid subprocess on graph load so the first
+        node-click renders fast. No-op if it's already running, no graph
+        is loaded, or pywebview isn't available (the existing
+        _open_mermaid_view surfaces those errors to the status label)."""
+        proc = getattr(self, "mermaid_proc", None)
+        if proc and proc.poll() is None:
+            return
+        if not getattr(self, "graph", None):
+            return
+        # Defer so the main GUI's auto-launch of vis.js gets first dibs
+        # on the GPU/IPC bandwidth and the Tk window finishes painting.
+        self.root.after(400, self._open_mermaid_view)
 
     def _open_interactive_view_quiet(self) -> None:
         """Same as _open_interactive_view but swallows the 'pywebview not
