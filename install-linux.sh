@@ -74,15 +74,19 @@ if [[ "$WEBKIT_OK" -eq 0 ]]; then
     echo
 fi
 
-# 3b. Install dependencies ---------------------------------------------------
-echo "[3/5] Installing dependencies (graphifyy, watchdog, numpy, pywebview)..."
+# 3b. Install dependencies (prefer locked file for reproducibility) ---------
+REQ_FILE="requirements.txt"
+if [[ -f "requirements.lock" ]]; then
+    REQ_FILE="requirements.lock"
+fi
+echo "[3/5] Installing dependencies from $REQ_FILE..."
 set +e  # we want to handle the failure ourselves
 if [[ "$USE_UV" -eq 1 ]]; then
-    uv pip install --python ".venv/bin/python" -r requirements.txt
+    uv pip install --python ".venv/bin/python" -r "$REQ_FILE"
     rc=$?
 else
     ".venv/bin/python" -m pip install --upgrade pip >/dev/null
-    ".venv/bin/python" -m pip install -r requirements.txt
+    ".venv/bin/python" -m pip install -r "$REQ_FILE"
     rc=$?
 fi
 set -e
