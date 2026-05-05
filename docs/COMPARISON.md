@@ -13,10 +13,10 @@ machine; rerun to refresh.
 
 | Step | Time | Notes |
 | ---- | ---- | ----- |
-| clone | 0.75 s | git clone --depth 1 |
-| graph build | 0.48 s | graphify update . - 202 nodes, 569 edges |
-| graph query (raw nodes) | 0.21 s | graphify query - 68 output lines, no natural-language answer |
-| chat answer (natural language, on-prem) | 6.94 s | Ollama qwen2.5:3b-instruct-q4_K_M - 99 words, answer: Based on the provided graph context, It'sDangerous primarily protects against data tampering and ensures that data has not been modified bet... |
+| clone | 0.97 s | git clone --depth 1 |
+| graph build | 0.47 s | graphify update . - 202 nodes, 569 edges |
+| graph query (raw nodes) | 0.22 s | graphify query - 69 output lines, no natural-language answer |
+| chat answer (natural language, on-prem) | 6.64 s | Ollama qwen2.5:3b-instruct-q4_K_M - 132 words, answer: Based on the provided graph context, It seems like "ItsDangerous" is a package designed to handle data security, specifically related to pro... |
 
 Graph build time is the *control*: same engine either way, so
 the wrapper is neither faster nor slower at the engine work
