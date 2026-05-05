@@ -780,25 +780,31 @@ class GraphifyApp:
         nb.pack(fill=BOTH, expand=True, padx=10, pady=(4, 10))
         self.notebook = nb
 
+        # Tab order: Mermaid first (auto-focused on every node click),
+        # Details second (inspector for the same node), then the rest.
+        mermaid_tab = ttk.Frame(nb, style="Panel.TFrame")
         details_tab = ttk.Frame(nb, style="Panel.TFrame")
         browse_tab = ttk.Frame(nb, style="Panel.TFrame")
         insights_tab = ttk.Frame(nb, style="Panel.TFrame")
-        mermaid_tab = ttk.Frame(nb, style="Panel.TFrame")
         chat_tab = ttk.Frame(nb, style="Panel.TFrame")
         output_tab = ttk.Frame(nb, style="Panel.TFrame")
+        nb.add(mermaid_tab, text="Mermaid")
         nb.add(details_tab, text="Details")
         nb.add(browse_tab, text="Browse")
         nb.add(insights_tab, text="Insights")
-        nb.add(mermaid_tab, text="Mermaid")
         nb.add(chat_tab, text="Chat (local LLM)")
         nb.add(output_tab, text="Output")
 
+        self._build_mermaid_tab(mermaid_tab)
         self._build_details_tab(details_tab)
         self._build_browse_tab(browse_tab)
         self._build_insights_tab(insights_tab)
-        self._build_mermaid_tab(mermaid_tab)
         self._build_chat_tab(chat_tab)
         self._build_output_tab(output_tab)
+
+        # Indices of the tabs we explicitly focus from code.
+        self.TAB_MERMAID = 0
+        self.TAB_DETAILS = 1
 
     def _build_details_tab(self, parent: ttk.Frame) -> None:
         ttk.Label(parent, text="Selected node", style="Title.TLabel").pack(
@@ -1058,9 +1064,10 @@ class GraphifyApp:
             return
         self.selected_node = node_id
         self._show_node_details(node_id)
-        # Switch to Details so user sees the result.
+        # Switch to the Mermaid tab so the diagram for this node is the
+        # default view; Details is one tab over.
         try:
-            self.notebook.select(0)
+            self.notebook.select(self.TAB_MERMAID)
         except Exception:
             pass
         # Tell vis.js to highlight + zoom (no-op if not open)
@@ -1210,6 +1217,44 @@ class GraphifyApp:
         s = re.sub(r"\W+", "_", str(s))
         return s[:50] or "n"
 
+    @staticmethod
+    def _mermaid_safe_label(raw, fallback: str = "") -> str:
+        """Strip every character that Mermaid 10's flowchart parser dislikes
+        inside an `id["..."]` label. Real labels graphify produces sometimes
+        contain newlines, double-quotes, brackets, parens, semicolons, and
+        the occasional pasted excerpt with apostrophes - any of those break
+        Mermaid's tokenizer. Be aggressive."""
+        s = str(raw if raw is not None else "")
+        # Newlines / control chars -> single space
+        s = re.sub(r"[\r\n\t\f\v]+", " ", s)
+        # Characters Mermaid uses for shape syntax or directives - replace
+        # with a safe ASCII equivalent or strip.
+        replacements = {
+            '"':  "'",   # double-quote ends the label
+            '`':  "'",   # backticks confuse the lexer in some contexts
+            '[':  '(',
+            ']':  ')',
+            '{':  '(',
+            '}':  ')',
+            '<':  '(',
+            '>':  ')',
+            '|':  '/',
+            ';':  ',',
+            '#':  ' ',
+            '&':  ' and ',
+            '\\': '/',
+        }
+        for k, v in replacements.items():
+            s = s.replace(k, v)
+        # Collapse runs of whitespace.
+        s = re.sub(r"\s+", " ", s).strip()
+        # Cap to a readable length.
+        if len(s) > 60:
+            s = s[:57].rstrip() + "..."
+        if not s:
+            s = str(fallback)[:40] or "n"
+        return s
+
     def _graph_to_mermaid(self, G, max_nodes: int = 30) -> str:
         """Generate a `flowchart TD` block. Caps to `max_nodes` by degree
         so the result stays readable when copied into a doc."""
@@ -1222,10 +1267,10 @@ class GraphifyApp:
 
         lines = ["flowchart TD"]
         for n, attrs in G.nodes(data=True):
-            label = str(attrs.get("label", n)).replace('"', "'")[:60]
+            label = self._mermaid_safe_label(attrs.get("label", n), fallback=n)
             lines.append(f'    {self._safe_mermaid_id(n)}["{label}"]')
         for u, v, ed in G.edges(data=True):
-            rel = (ed.get("relation") or "").strip()
+            rel = self._mermaid_safe_label(ed.get("relation") or "", fallback="")
             su, sv = self._safe_mermaid_id(u), self._safe_mermaid_id(v)
             if rel:
                 lines.append(f"    {su} -->|{rel}| {sv}")
@@ -2023,11 +2068,8 @@ class GraphifyApp:
             sg_label = f"community {cid}" if cid >= 0 else "no community"
             lines.append(f"    subgraph {sg_id} [{sg_label}]")
             for n in members:
-                label = (
-                    str(G.nodes[n].get("label", n))
-                    .replace('"', "'")
-                    .replace("[", "(")
-                    .replace("]", ")")[:40]
+                label = self._mermaid_safe_label(
+                    G.nodes[n].get("label", n), fallback=n,
                 )
                 safe = self._safe_mermaid_id(n)
                 lines.append(f'        {safe}["{label}"]')
@@ -3719,7 +3761,7 @@ class GraphifyApp:
         self.selected_node = node_id
         self._show_node_details(node_id)
         try:
-            self.notebook.select(0)
+            self.notebook.select(self.TAB_MERMAID)
         except Exception:
             pass
         try:
@@ -3786,8 +3828,10 @@ class GraphifyApp:
             messagebox.showerror("Failed", f"Could not open folder:\n{exc}")
 
     def _switch_to_output_tab(self) -> None:
+        # Output is the last tab in the notebook regardless of reorder.
         try:
-            self.notebook.select(2)  # Output tab
+            tabs = self.notebook.tabs()
+            self.notebook.select(tabs[-1])
         except Exception:
             pass
 
