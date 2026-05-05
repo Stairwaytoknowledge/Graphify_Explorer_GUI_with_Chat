@@ -1165,7 +1165,8 @@ class GraphifyApp:
             cid = int(arg)
             keep = [
                 n for n, a in G.nodes(data=True)
-                if int(a.get("community", -1) or -1) == cid
+                if a.get("community") is not None
+                and int(a.get("community")) == cid
             ]
             if not keep:
                 messagebox.showinfo(
