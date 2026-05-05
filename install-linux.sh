@@ -121,21 +121,26 @@ ERR
     exit 1
 fi
 
-# Sanity check: pywebview must be importable.
+# Sanity check: pywebview should be importable, but a missing GTK WebKit
+# is recoverable (the rest of the GUI works; only the graph viewer needs
+# webview). Warn instead of failing the install so headless / system
+# environments without WebKit can still get the rest installed.
 if ! ".venv/bin/python" -c "import webview" >/dev/null 2>&1; then
-    cat <<'ERR'
+    cat <<'WARN'
 
 ============================================================
-  ERROR: pywebview installed but cannot be imported.
+  WARNING: pywebview installed but cannot be imported.
 ============================================================
-  On Linux this almost always means GTK WebKit isn't installed.
-  Install it:
-    Debian/Ubuntu:  sudo apt install python3-gi gir1.2-webkit2-4.0
+  The Interactive Graph window will not open until GTK WebKit
+  is installed:
+    Debian/Ubuntu:  sudo apt install python3-gi gir1.2-webkit2-4.1
+                    (or gir1.2-webkit2-4.0 on older releases)
     Fedora:         sudo dnf install python3-gobject webkit2gtk4.0
     Arch:           sudo pacman -S python-gobject webkit2gtk-4.1
+  Everything else (graph build, query, Insights tab, chat) will
+  work without it.
 
-ERR
-    exit 1
+WARN
 fi
 
 # 4. Icon + .desktop entry --------------------------------------------------
