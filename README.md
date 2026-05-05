@@ -197,16 +197,16 @@ stops with a clear message.
 
 **On all OSes:**
 
-1. **Check your internet connection** — the installer downloads from
+1. **Check your internet connection** - the installer downloads from
    PyPI. Behind a corporate proxy? Set `HTTPS_PROXY` first.
-2. **Check your Python version** — must be 3.10 or newer:
+2. **Check your Python version** - must be 3.10 or newer:
    ```
    python --version    (Windows)
    python3 --version   (macOS / Linux)
    ```
    If older, install a newer Python from
    <https://www.python.org/downloads/> and re-run the installer.
-3. **Try a clean venv** — delete the `.venv/` folder next to the
+3. **Try a clean venv** - delete the `.venv/` folder next to the
    installer and run the installer again. Sometimes a half-installed
    venv from a previous run gets stuck.
 
@@ -216,13 +216,13 @@ The graph viewer uses `pywebview`, which needs a system-level webview
 component on each OS. The package itself is installed by the
 installer, but the system component isn't.
 
-**Windows** — needs Edge WebView2 (built into Windows 10 21H2 and newer):
+**Windows** - needs Edge WebView2 (built into Windows 10 21H2 and newer):
 - Most Windows 10/11 machines already have it.
 - If it's missing, download the **Evergreen Standalone Installer**
   from <https://developer.microsoft.com/microsoft-edge/webview2/>,
   run it once, then re-run `Install-Windows.bat`.
 
-**macOS** — uses WKWebView (part of macOS):
+**macOS** - uses WKWebView (part of macOS):
 - Always present; if it fails to import, run:
   ```
   ./.venv/bin/pip install --force-reinstall pyobjc-core
@@ -231,7 +231,7 @@ installer, but the system component isn't.
 - If you still hit issues, install Xcode Command Line Tools:
   `xcode-select --install`.
 
-**Linux** — needs GTK WebKit 2:
+**Linux** - needs GTK WebKit 2:
 
 | Distro | Command |
 |---|---|
