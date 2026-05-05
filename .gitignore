@@ -14,3 +14,4 @@ benchmarks/_work/
 *.pyc
 .idea/
 .vscode/
+_mermaid_view.html
