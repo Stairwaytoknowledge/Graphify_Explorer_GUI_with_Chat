@@ -40,14 +40,19 @@ else
     echo "[2/6] Created .venv/"
 fi
 
-# 3. Install dependencies ----------------------------------------------------
-echo "[3/6] Installing dependencies (graphifyy, watchdog, numpy, pywebview)..."
+# 3. Install dependencies (prefer the locked file for reproducibility) ------
+#    requirements.lock is fully pinned via `uv pip compile --universal`.
+REQ_FILE="requirements.txt"
+if [[ -f "requirements.lock" ]]; then
+    REQ_FILE="requirements.lock"
+fi
+echo "[3/6] Installing dependencies from $REQ_FILE..."
 if [[ "$USE_UV" -eq 1 ]]; then
-    uv pip install --python ".venv/bin/python" -r requirements.txt
+    uv pip install --python ".venv/bin/python" -r "$REQ_FILE"
     rc=$?
 else
     ".venv/bin/python" -m pip install --upgrade pip >/dev/null
-    ".venv/bin/python" -m pip install -r requirements.txt
+    ".venv/bin/python" -m pip install -r "$REQ_FILE"
     rc=$?
 fi
 if [[ $rc -ne 0 ]]; then

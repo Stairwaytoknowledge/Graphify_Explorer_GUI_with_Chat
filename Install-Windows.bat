@@ -63,15 +63,22 @@ if exist ".venv\Scripts\python.exe" (
     echo [2/5] Created .venv\
 )
 
-REM ---- Install graphifyy + watchdog + numpy + pywebview --------------------
-echo [3/5] Installing dependencies (graphifyy, watchdog, numpy, pywebview)...
+REM ---- Install dependencies (prefer the locked file for reproducibility) --
+REM    requirements.lock (universal, fully pinned by `uv pip compile`)
+REM    -> deterministic install: every machine gets the exact same
+REM       graphifyy/watchdog/numpy/pywebview versions plus their transitives.
+REM    requirements.txt is the loose source, used only if the lock is
+REM    missing (e.g. fresh checkout on an unsupported platform).
+set "REQ_FILE=requirements.txt"
+if exist "requirements.lock" set "REQ_FILE=requirements.lock"
+echo [3/5] Installing dependencies from %REQ_FILE%...
 set "INSTALL_RC=0"
 if defined USE_UV (
-    uv pip install --python ".venv\Scripts\python.exe" -r requirements.txt
+    uv pip install --python ".venv\Scripts\python.exe" -r "%REQ_FILE%"
     set "INSTALL_RC=!errorlevel!"
 ) else (
     ".venv\Scripts\python.exe" -m pip install --upgrade pip >nul
-    ".venv\Scripts\python.exe" -m pip install -r requirements.txt
+    ".venv\Scripts\python.exe" -m pip install -r "%REQ_FILE%"
     set "INSTALL_RC=!errorlevel!"
 )
 if not "!INSTALL_RC!"=="0" goto :install_failed
