@@ -12,25 +12,32 @@ echo "============================================================"
 echo
 
 # 1. Find python or uv -------------------------------------------------------
+# We need a `PY` that points at a usable interpreter for pre-flight
+# checks BEFORE the venv exists. With uv we still need a system python
+# to do the GTK-WebKit / tkinter probes; use whichever python3 is on
+# PATH if we can find one, else fall back to a placeholder that we'll
+# only use after the venv is built.
 USE_UV=0
 if command -v uv >/dev/null 2>&1; then
     USE_UV=1
     echo "[1/5] Found uv. Using it for venv + install."
+fi
+if command -v python3 >/dev/null 2>&1; then
+    PY=python3
+elif [[ "$USE_UV" -eq 0 ]]; then
+    echo "ERROR: No python3 in PATH. Install Python 3.10+ via your package"
+    echo "       manager (apt/dnf/pacman) or install uv from"
+    echo "       https://docs.astral.sh/uv/"
+    exit 1
 else
-    if command -v python3 >/dev/null 2>&1; then
-        PY=python3
-    else
-        echo "ERROR: No python3 in PATH. Install Python 3.10+ via your package"
-        echo "       manager (apt/dnf/pacman) or install uv from"
-        echo "       https://docs.astral.sh/uv/"
-        exit 1
-    fi
-    echo "[1/5] Using $PY to create the venv."
+    # uv present but no system python3 - skip pre-venv probes; we'll
+    # use the venv's python after it's created.
+    PY=""
 fi
 
-# Some distros split out venv/tk. Check for tkinter early so the user
-# gets a useful message instead of a confusing import error later.
-if [[ "$USE_UV" -eq 0 ]]; then
+# Some distros split out venv/tk. Check for tkinter early when we have
+# a system python to probe with; skip when uv-only with no system python.
+if [[ -n "$PY" && "$USE_UV" -eq 0 ]]; then
     if ! "$PY" -c "import tkinter" >/dev/null 2>&1; then
         echo "ERROR: Python tkinter is missing."
         echo "       Debian/Ubuntu:  sudo apt install python3-tk python3-venv"
@@ -53,10 +60,15 @@ else
 fi
 
 # 3a. Pre-flight: GTK WebKit is needed for pywebview on Linux ---------------
+# Only probe if we have a system python to probe with. Even when this
+# probe is skipped, the install proceeds; the runtime warns clearly if
+# WebKit is missing when the user tries to open the Interactive Graph.
 WEBKIT_OK=0
-if "$PY" -c "import gi; gi.require_version('WebKit2', '4.1'); from gi.repository import WebKit2" >/dev/null 2>&1 \
-   || "$PY" -c "import gi; gi.require_version('WebKit2', '4.0'); from gi.repository import WebKit2" >/dev/null 2>&1; then
-    WEBKIT_OK=1
+if [[ -n "$PY" ]]; then
+    if "$PY" -c "import gi; gi.require_version('WebKit2', '4.1'); from gi.repository import WebKit2" >/dev/null 2>&1 \
+       || "$PY" -c "import gi; gi.require_version('WebKit2', '4.0'); from gi.repository import WebKit2" >/dev/null 2>&1; then
+        WEBKIT_OK=1
+    fi
 fi
 if [[ "$WEBKIT_OK" -eq 0 ]]; then
     echo
