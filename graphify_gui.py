@@ -783,17 +783,20 @@ class GraphifyApp:
         details_tab = ttk.Frame(nb, style="Panel.TFrame")
         browse_tab = ttk.Frame(nb, style="Panel.TFrame")
         insights_tab = ttk.Frame(nb, style="Panel.TFrame")
+        mermaid_tab = ttk.Frame(nb, style="Panel.TFrame")
         chat_tab = ttk.Frame(nb, style="Panel.TFrame")
         output_tab = ttk.Frame(nb, style="Panel.TFrame")
         nb.add(details_tab, text="Details")
         nb.add(browse_tab, text="Browse")
         nb.add(insights_tab, text="Insights")
+        nb.add(mermaid_tab, text="Mermaid")
         nb.add(chat_tab, text="Chat (local LLM)")
         nb.add(output_tab, text="Output")
 
         self._build_details_tab(details_tab)
         self._build_browse_tab(browse_tab)
         self._build_insights_tab(insights_tab)
+        self._build_mermaid_tab(mermaid_tab)
         self._build_chat_tab(chat_tab)
         self._build_output_tab(output_tab)
 
@@ -1048,8 +1051,9 @@ class GraphifyApp:
             self._select_and_highlight_node(nid)
 
     def _select_and_highlight_node(self, node_id: str) -> None:
-        """Select a node: populate Details, highlight in matplotlib, and
-        in vis.js if open."""
+        """Select a node: populate Details, highlight in vis.js, push a
+        live Mermaid render of the 1-hop neighbourhood to the Mermaid
+        pane."""
         if not self.graph or node_id not in self.graph:
             return
         self.selected_node = node_id
@@ -1062,6 +1066,12 @@ class GraphifyApp:
         # Tell vis.js to highlight + zoom (no-op if not open)
         try:
             self._highlight_in_vis([node_id])
+        except Exception:
+            pass
+        # Push a Mermaid render of the selection to the right pane
+        # (no-op if Mermaid pane isn't built yet).
+        try:
+            self._update_mermaid_pane(node_id)
         except Exception:
             pass
 
@@ -1681,6 +1691,468 @@ class GraphifyApp:
                self.insights_text.compare(idx, "<", end):
                 self._select_and_highlight_node(nid)
                 return
+
+    # ===== Mermaid tab ====================================================
+    #
+    # Live Mermaid diagram of the selected node's 1-hop neighbourhood.
+    # Auto-updates on every node selection (with a small debounce). On
+    # Windows the renderer subprocess is reparented into this tab via
+    # SetParent (same trick as the main vis.js view); on macOS/Linux it
+    # opens as a separate native window.
+
+    MERMAID_AUTO_DEBOUNCE_MS = 250
+    MERMAID_DEFAULT_HOPS = 1
+
+    def _build_mermaid_tab(self, parent: ttk.Frame) -> None:
+        # Top-row controls
+        ctl = ttk.Frame(parent, style="Panel.TFrame")
+        ctl.pack(fill="x", padx=10, pady=(10, 4))
+        ttk.Label(ctl, text="Mermaid", style="Title.TLabel").pack(side=LEFT)
+
+        self.mermaid_status_var = StringVar(value="not started")
+        ttk.Label(
+            ctl, textvariable=self.mermaid_status_var,
+            style="Dim.TLabel", wraplength=280,
+        ).pack(side=LEFT, padx=10)
+
+        # Live-update toggle (default ON)
+        self.mermaid_live_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            ctl, text="Live", variable=self.mermaid_live_var,
+        ).pack(side=RIGHT)
+
+        # Scope picker
+        scope_row = ttk.Frame(parent, style="Panel.TFrame")
+        scope_row.pack(fill="x", padx=10, pady=(0, 6))
+        ttk.Label(scope_row, text="Scope:", style="Dim.TLabel").pack(
+            side=LEFT, padx=(0, 6)
+        )
+        self.mermaid_scope_var = StringVar(value="1-hop")
+        ttk.Combobox(
+            scope_row,
+            textvariable=self.mermaid_scope_var,
+            values=["1-hop", "2-hop", "community", "file"],
+            state="readonly",
+            width=12,
+        ).pack(side=LEFT)
+        ttk.Button(
+            scope_row, text="Refresh",
+            command=self._mermaid_refresh,
+        ).pack(side=LEFT, padx=4)
+        ttk.Button(
+            scope_row, text="Reopen",
+            command=self._open_mermaid_view,
+        ).pack(side=LEFT, padx=4)
+        ttk.Button(
+            scope_row, text="Copy text",
+            command=self._mermaid_copy_text,
+        ).pack(side=RIGHT)
+
+        # Embed target frame (right-pane equivalent of the left-pane embed).
+        # On Windows the Mermaid subprocess gets SetParent-ed into here.
+        self.mermaid_frame = tk.Frame(
+            parent, bg=PALETTE["panel_alt"], width=560, height=600,
+        )
+        self.mermaid_frame.pack(fill=BOTH, expand=True, padx=10, pady=(4, 10))
+        self.mermaid_frame.pack_propagate(False)
+
+        if os.name != "nt":
+            ttk.Label(
+                self.mermaid_frame,
+                text=(
+                    "Mermaid renderer opens in a separate native window.\n"
+                    "Window-embedding here is currently Windows-only."
+                ),
+                style="Dim.TLabel", justify="center",
+                background=PALETTE["panel_alt"],
+            ).pack(expand=True, padx=20, pady=20)
+            self._mermaid_hwnd: int | None = None
+        else:
+            self._mermaid_placeholder = tk.Label(
+                self.mermaid_frame,
+                text=(
+                    "Mermaid pane will appear here once a graph is loaded\n"
+                    "and you click a node."
+                ),
+                bg=PALETTE["panel_alt"], fg=PALETTE["fg_dim"],
+                justify="center",
+            )
+            self._mermaid_placeholder.pack(expand=True)
+            self._mermaid_hwnd = None
+            self._mermaid_poll_count = 0
+            self.mermaid_frame.bind(
+                "<Configure>", self._on_mermaid_configure,
+            )
+
+        # State
+        self.mermaid_proc = None
+        self._last_mermaid_text: str = ""
+        self._mermaid_pending_text: str | None = None
+        self._mermaid_debounce_after: str | None = None
+
+    # ---- subprocess lifecycle -------------------------------------------
+
+    def _open_mermaid_view(self) -> None:
+        if getattr(self, "mermaid_proc", None) and self.mermaid_proc.poll() is None:
+            # Already up; just re-render whatever's pending or last.
+            if self._last_mermaid_text:
+                self._mermaid_send_text(self._last_mermaid_text)
+            return
+        path = self._selected_path(silent=True)
+        if not path:
+            self.mermaid_status_var.set(
+                "load a graph first - then click a node"
+            )
+            return
+        script = APP_DIR / "graphify_mermaid_window.py"
+        if not script.exists():
+            self.mermaid_status_var.set(
+                "graphify_mermaid_window.py missing"
+            )
+            return
+        try:
+            self.mermaid_proc = subprocess.Popen(
+                [sys.executable, str(script)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+        except Exception as exc:
+            self.mermaid_status_var.set(f"failed to start: {exc}")
+            return
+        self.mermaid_status_var.set("launching...")
+        threading.Thread(
+            target=self._mermaid_event_loop, daemon=True,
+        ).start()
+        if os.name == "nt":
+            self._mermaid_poll_count = 0
+            self.root.after(500, self._mermaid_embed_poll_tick)
+
+    def _mermaid_event_loop(self) -> None:
+        proc = self.mermaid_proc
+        if not proc or not proc.stdout:
+            return
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            ev = msg.get("event")
+            if ev == "ready":
+                self.root.after(
+                    0,
+                    lambda: self.mermaid_status_var.set("ready"),
+                )
+                # Render any pending text now that we're up.
+                if self._mermaid_pending_text:
+                    self.root.after(0, self._mermaid_flush_pending)
+            elif ev == "rendered":
+                ok = msg.get("ok")
+                err = msg.get("error", "")
+                self.root.after(
+                    0,
+                    lambda o=ok, e=err: self.mermaid_status_var.set(
+                        "render error: " + e[:80] if not o else "ok"
+                    ),
+                )
+        # subprocess exited
+        def _on_exit():
+            self.mermaid_status_var.set("Mermaid renderer closed")
+            if hasattr(self, "_mermaid_hwnd"):
+                self._mermaid_hwnd = None
+            if hasattr(self, "_mermaid_placeholder"):
+                try:
+                    self._mermaid_placeholder.pack(expand=True)
+                except Exception:
+                    pass
+        self.root.after(0, _on_exit)
+
+    def _mermaid_send_text(self, text: str) -> None:
+        proc = getattr(self, "mermaid_proc", None)
+        if not proc or proc.poll() is not None or not proc.stdin:
+            # Not running - queue the text and let the spawn handle render.
+            self._mermaid_pending_text = text
+            return
+        try:
+            proc.stdin.write(json.dumps({
+                "cmd": "render", "text": text,
+                "status": "rendered",
+            }) + "\n")
+            proc.stdin.flush()
+            self._last_mermaid_text = text
+        except (OSError, BrokenPipeError):
+            pass
+
+    def _mermaid_flush_pending(self) -> None:
+        if self._mermaid_pending_text:
+            self._mermaid_send_text(self._mermaid_pending_text)
+            self._mermaid_pending_text = None
+
+    # ---- selection-driven update ----------------------------------------
+
+    def _update_mermaid_pane(self, node_id: str | None) -> None:
+        """Compute Mermaid for the current selection + scope and post it
+        to the renderer. Debounced to avoid rapid-click thrash."""
+        if not self.mermaid_live_var.get() and self._last_mermaid_text:
+            # Live update off and we already have a diagram - leave it.
+            return
+        # Cancel any pending debounce.
+        if getattr(self, "_mermaid_debounce_after", None):
+            try:
+                self.root.after_cancel(self._mermaid_debounce_after)
+            except Exception:
+                pass
+        self._mermaid_debounce_after = self.root.after(
+            self.MERMAID_AUTO_DEBOUNCE_MS,
+            lambda nid=node_id: self._mermaid_render_now(nid),
+        )
+
+    def _mermaid_render_now(self, node_id: str | None) -> None:
+        self._mermaid_debounce_after = None
+        sub = self._mermaid_scope_subgraph(node_id)
+        if sub is None or sub.number_of_nodes() == 0:
+            return
+        text = self._graph_to_mermaid_annotated(sub, max_nodes=40)
+        self._mermaid_send_text(text)
+        # Auto-spawn the subprocess if it's not running yet.
+        if not getattr(self, "mermaid_proc", None) \
+                or self.mermaid_proc.poll() is not None:
+            self._open_mermaid_view()
+
+    def _mermaid_refresh(self) -> None:
+        nid = self.selected_node
+        self._mermaid_render_now(nid)
+
+    def _mermaid_copy_text(self) -> None:
+        if not self._last_mermaid_text:
+            return
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(self._last_mermaid_text)
+            self.root.update()
+            self.mermaid_status_var.set("Mermaid text copied to clipboard")
+        except Exception:
+            pass
+
+    def _mermaid_scope_subgraph(self, node_id: str | None):
+        if not self.graph:
+            return None
+        scope = self.mermaid_scope_var.get()
+        if scope == "1-hop":
+            return self._n_hop_subgraph(node_id, 1) if node_id else None
+        if scope == "2-hop":
+            return self._n_hop_subgraph(node_id, 2) if node_id else None
+        if scope == "community":
+            if not node_id or node_id not in self.graph:
+                return None
+            cid = self.graph.nodes[node_id].get("community")
+            if cid is None:
+                return None
+            keep = [
+                n for n, a in self.graph.nodes(data=True)
+                if a.get("community") is not None
+                and int(a.get("community")) == int(cid)
+            ]
+            return self.graph.subgraph(keep).copy()
+        if scope == "file":
+            if not node_id or node_id not in self.graph:
+                return None
+            src = self.graph.nodes[node_id].get("source_file") or ""
+            if not src:
+                return None
+            keep = [
+                n for n, a in self.graph.nodes(data=True)
+                if (a.get("source_file") or "") == src
+            ]
+            return self.graph.subgraph(keep).copy()
+        return None
+
+    # ---- annotated Mermaid generator ------------------------------------
+    #
+    # Differences vs the plain _graph_to_mermaid:
+    #   - Subgraph blocks per community
+    #   - Edge style by relation type (calls/imports/contains/inherits/refs)
+    #   - classDef per community for color coding
+    #   - Cap at max_nodes by degree, with a note
+
+    _RELATION_ARROW = {
+        "calls":      "-->",
+        "imports":    "-.->",
+        "contains":   "-..->",
+        "inherits":   "==>",
+        "references": "-.-",
+    }
+
+    def _graph_to_mermaid_annotated(self, G, max_nodes: int = 40) -> str:
+        """Generate a Mermaid flowchart with subgraph-per-community
+        grouping and edge-style-by-relation."""
+        if G.number_of_nodes() == 0:
+            return "flowchart TD\n    empty[\"empty\"]"
+
+        capped = False
+        original_n = G.number_of_nodes()
+        if original_n > max_nodes:
+            capped = True
+            top = sorted(G.degree, key=lambda x: -x[1])[:max_nodes]
+            keep = {n for n, _ in top}
+            G = G.subgraph(keep).copy()
+
+        # Bucket nodes by community for subgraph blocks.
+        by_comm: dict[int, list[str]] = {}
+        for n, a in G.nodes(data=True):
+            c = a.get("community")
+            cid = int(c) if c is not None else -1
+            by_comm.setdefault(cid, []).append(n)
+
+        # Palette to color communities. Repeats for >10 communities.
+        PALETTE_HEX = [
+            "#5ac6ff", "#ff7a90", "#7c5cff", "#5fd38f", "#ffb454",
+            "#ff8b3d", "#3dd1c5", "#d2a4ff", "#ffd166", "#9bd4ff",
+        ]
+
+        lines: list[str] = ["flowchart TD"]
+
+        # Render subgraph blocks; one per community.
+        for cid, members in sorted(by_comm.items()):
+            sg_id = f"comm_{cid}" if cid >= 0 else "comm_none"
+            sg_label = f"community {cid}" if cid >= 0 else "no community"
+            lines.append(f"    subgraph {sg_id} [{sg_label}]")
+            for n in members:
+                label = (
+                    str(G.nodes[n].get("label", n))
+                    .replace('"', "'")
+                    .replace("[", "(")
+                    .replace("]", ")")[:40]
+                )
+                safe = self._safe_mermaid_id(n)
+                lines.append(f'        {safe}["{label}"]')
+            lines.append("    end")
+
+        # Edges, styled by relation.
+        for u, v, ed in G.edges(data=True):
+            rel = (ed.get("relation") or "").strip()
+            arrow = self._RELATION_ARROW.get(rel, "-->")
+            su = self._safe_mermaid_id(u)
+            sv = self._safe_mermaid_id(v)
+            if rel:
+                lines.append(f"    {su} {arrow}|{rel}| {sv}")
+            else:
+                lines.append(f"    {su} {arrow} {sv}")
+
+        # classDef + class assignments for community colors.
+        for cid, _ in sorted(by_comm.items()):
+            if cid < 0:
+                continue
+            color = PALETTE_HEX[cid % len(PALETTE_HEX)]
+            lines.append(
+                f"    classDef cls_{cid} fill:{color}22,stroke:{color},color:#e7ecf3"
+            )
+        for cid, members in sorted(by_comm.items()):
+            if cid < 0:
+                continue
+            ids = ",".join(self._safe_mermaid_id(n) for n in members)
+            lines.append(f"    class {ids} cls_{cid}")
+
+        if capped:
+            lines.insert(
+                1, f"    %% showing top {max_nodes} of {original_n} by degree"
+            )
+
+        return "\n".join(lines)
+
+    # ---- Win32 embedding (mirror of _embed_hwnd_in_frame) ---------------
+
+    def _mermaid_embed_poll_tick(self) -> None:
+        if os.name != "nt":
+            return
+        if self._mermaid_hwnd is not None:
+            return
+        proc = getattr(self, "mermaid_proc", None)
+        if not proc or proc.poll() is not None:
+            return
+        self._mermaid_poll_count += 1
+        hwnd = self._find_window_by_title("Graphify - Mermaid")
+        if hwnd:
+            try:
+                # Reuse the same SetParent helper used for the vis.js view.
+                self._embed_arbitrary_hwnd(hwnd, self.mermaid_frame)
+                self._mermaid_hwnd = hwnd
+                self.mermaid_status_var.set("embedded")
+                if hasattr(self, "_mermaid_placeholder"):
+                    try:
+                        self._mermaid_placeholder.pack_forget()
+                    except Exception:
+                        pass
+                return
+            except Exception as exc:
+                self.mermaid_status_var.set(f"embed failed: {exc}")
+                return
+        if self._mermaid_poll_count < 75:
+            self.root.after(200, self._mermaid_embed_poll_tick)
+
+    def _embed_arbitrary_hwnd(self, child_hwnd: int, target_frame) -> None:
+        """Generalized SetParent: reparents `child_hwnd` into `target_frame`
+        and strips decorations. Used by both the vis.js and Mermaid panes."""
+        import ctypes
+        user32 = ctypes.windll.user32
+        GWL_STYLE       = -16
+        WS_CAPTION      = 0x00C00000
+        WS_THICKFRAME   = 0x00040000
+        WS_SYSMENU      = 0x00080000
+        WS_MINIMIZEBOX  = 0x00020000
+        WS_MAXIMIZEBOX  = 0x00010000
+        WS_CHILD        = 0x40000000
+        WS_VISIBLE      = 0x10000000
+        WS_POPUP        = 0x80000000
+        SWP_NOZORDER    = 0x0004
+        SWP_FRAMECHANGED = 0x0020
+        SWP_SHOWWINDOW  = 0x0040
+
+        get_long = getattr(user32, "GetWindowLongPtrW", None) \
+            or user32.GetWindowLongW
+        set_long = getattr(user32, "SetWindowLongPtrW", None) \
+            or user32.SetWindowLongW
+
+        style = get_long(child_hwnd, GWL_STYLE)
+        new_style = (
+            (style
+             & ~WS_CAPTION & ~WS_THICKFRAME & ~WS_SYSMENU
+             & ~WS_MINIMIZEBOX & ~WS_MAXIMIZEBOX & ~WS_POPUP)
+            | WS_CHILD | WS_VISIBLE
+        )
+        set_long(child_hwnd, GWL_STYLE, new_style)
+
+        parent_hwnd = target_frame.winfo_id()
+        user32.SetParent(child_hwnd, parent_hwnd)
+        target_frame.update_idletasks()
+        w = max(1, target_frame.winfo_width())
+        h = max(1, target_frame.winfo_height())
+        user32.SetWindowPos(
+            child_hwnd, 0, 0, 0, w, h,
+            SWP_FRAMECHANGED | SWP_NOZORDER | SWP_SHOWWINDOW,
+        )
+
+    def _on_mermaid_configure(self, event) -> None:
+        if os.name != "nt":
+            return
+        hwnd = getattr(self, "_mermaid_hwnd", None)
+        if not hwnd:
+            return
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            SWP_NOZORDER = 0x0004
+            user32.SetWindowPos(
+                hwnd, 0, 0, 0, max(1, event.width), max(1, event.height),
+                SWP_NOZORDER,
+            )
+        except Exception:
+            pass
 
     def _build_output_tab(self, parent: ttk.Frame) -> None:
         text_frame = ttk.Frame(parent, style="Panel.TFrame")
@@ -3240,14 +3712,18 @@ class GraphifyApp:
         self.root.after(0, _on_exit)
 
     def _select_node_from_vis(self, node_id: str) -> None:
-        """Surface a node clicked in the vis.js window in the Details tab."""
+        """Surface a node clicked in the vis.js window in the Details tab
+        and push a live Mermaid render to the right pane."""
         if not self.graph or node_id not in self.graph:
             return
         self.selected_node = node_id
         self._show_node_details(node_id)
         try:
-            # Switch focus to the Details tab so the user sees the result.
             self.notebook.select(0)
+        except Exception:
+            pass
+        try:
+            self._update_mermaid_pane(node_id)
         except Exception:
             pass
 
