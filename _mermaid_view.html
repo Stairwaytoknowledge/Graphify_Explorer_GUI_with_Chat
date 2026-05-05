@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang='en'>
+<head>
+<meta charset='utf-8'>
+<title>Graphify - Mermaid</title>
+<script src='https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js'></script>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: #162033;
+    color: #e7ecf3;
+    font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    font-size: 12px;
+    overflow: auto;
+  }
+  #status {
+    padding: 8px 14px;
+    color: #9aa6b8;
+    border-bottom: 1px solid #1d2a40;
+    background: #101826;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+  #legend {
+    padding: 6px 14px;
+    color: #9aa6b8;
+    font-size: 11px;
+    border-bottom: 1px solid #1d2a40;
+    background: #101826;
+  }
+  #legend code {
+    background: #1d2a40;
+    color: #5ac6ff;
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+  #stage {
+    padding: 10px;
+  }
+  #stage svg {
+    max-width: 100%;
+    height: auto;
+    background: transparent;
+  }
+  /* Light text against dark background */
+  #stage .nodeLabel, #stage .edgeLabel, #stage text {
+    fill: #e7ecf3 !important;
+    color: #e7ecf3 !important;
+  }
+  #stage .edgeLabel {
+    background: #162033 !important;
+  }
+  .empty {
+    padding: 40px 14px;
+    color: #9aa6b8;
+    text-align: center;
+  }
+  .err {
+    padding: 14px;
+    color: #ff7a90;
+    white-space: pre-wrap;
+    font-family: Consolas, Menlo, monospace;
+    font-size: 11px;
+  }
+</style>
+</head>
+<body>
+<div id='status'>waiting...</div>
+<div id='legend'>
+  edges: <code>--></code> calls &nbsp;
+  <code>-.-></code> imports &nbsp;
+  <code>...></code> contains &nbsp;
+  <code>==></code> inherits &nbsp;
+  <code>-.-</code> references
+</div>
+<div id='stage'>
+  <div class='empty'>
+    Click a node in the main graph to render its 1-hop Mermaid here.
+  </div>
+</div>
+<script>
+  // Initialize Mermaid with a dark theme. We render imperatively via
+  // mermaid.render() to keep diagrams swappable.
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: 'dark',
+    themeVariables: {
+      darkMode: true,
+      background: '#162033',
+      primaryColor: '#1d2a40',
+      primaryTextColor: '#e7ecf3',
+      primaryBorderColor: '#33415a',
+      lineColor: '#5ac6ff',
+      secondaryColor: '#162033',
+      tertiaryColor: '#101826'
+    },
+    flowchart: { curve: 'basis', useMaxWidth: true }
+  });
+
+  let _seq = 0;
+  function setStatus(s) { document.getElementById('status').textContent = s; }
+
+  window.gx_render = async function(text, status) {
+    setStatus(status || 'rendering...');
+    const stage = document.getElementById('stage');
+    stage.innerHTML = '';
+    const id = 'gx-' + (++_seq);
+    try {
+      const {svg} = await mermaid.render(id, text);
+      stage.innerHTML = svg;
+      setStatus(status || 'ready');
+      if (window.pywebview) window.pywebview.api.on_rendered(true, '');
+    } catch (e) {
+      stage.innerHTML = '<pre class=err>' + (e.message || String(e)) + '</pre>';
+      setStatus('render error');
+      if (window.pywebview) window.pywebview.api.on_rendered(false, String(e));
+    }
+  };
+
+  window.gx_clear = function() {
+    document.getElementById('stage').innerHTML =
+      '<div class=empty>Click a node to render its diagram.</div>';
+    setStatus('cleared');
+  };
+
+  window.addEventListener('load', function () {
+    setStatus('ready');
+    if (window.pywebview) window.pywebview.api.on_ready();
+  });
+</script>
+</body>
+</html>
