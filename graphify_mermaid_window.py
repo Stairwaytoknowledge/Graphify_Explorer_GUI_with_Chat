@@ -50,7 +50,12 @@ PAGE_HTML = f"""<!doctype html>
     color: #e7ecf3;
     font-family: -apple-system, Segoe UI, Roboto, sans-serif;
     font-size: 12px;
-    overflow: auto;
+    overflow: hidden;
+  }}
+  body {{
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
   }}
   #status {{
     padding: 8px 14px;
@@ -74,13 +79,75 @@ PAGE_HTML = f"""<!doctype html>
     padding: 1px 4px;
     border-radius: 3px;
   }}
+  #status, #legend {{ flex: 0 0 auto; }}
+  #stage-wrap {{
+    position: relative;
+    overflow: hidden;
+    flex: 1 1 auto;
+    min-height: 200px;
+    cursor: grab;
+    background: #162033;
+  }}
+  #explanation {{
+    flex: 0 0 auto;
+    max-height: 32%;
+    overflow-y: auto;
+    border-top: 1px solid #1d2a40;
+    padding: 8px 14px;
+    background: #101826;
+    color: #c8d4e3;
+    font-size: 11.5px;
+    line-height: 1.45;
+  }}
+  #explanation h4 {{
+    margin: 0 0 6px 0;
+    font-size: 11px;
+    color: #5ac6ff;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }}
+  #explanation .empty {{
+    color: #9aa6b8;
+    font-style: italic;
+  }}
+  #explanation ul {{
+    margin: 4px 0 4px 18px;
+    padding: 0;
+  }}
+  #explanation li {{ margin: 1px 0; }}
+  #explanation code {{
+    background: #1d2a40;
+    color: #5ac6ff;
+    padding: 1px 4px;
+    border-radius: 3px;
+  }}
+  #stage-wrap.grabbing {{ cursor: grabbing; }}
   #stage {{
+    position: absolute;
+    top: 0;
+    left: 0;
     padding: 10px;
+    transform-origin: 0 0;
+    will-change: transform;
   }}
   #stage svg {{
-    max-width: 100%;
+    max-width: none;
     height: auto;
     background: transparent;
+    user-select: none;
+  }}
+  #ctrl-hint {{
+    position: absolute;
+    right: 10px;
+    bottom: 10px;
+    padding: 4px 8px;
+    background: rgba(16, 24, 38, 0.85);
+    color: #9aa6b8;
+    border: 1px solid #1d2a40;
+    border-radius: 4px;
+    font-size: 10px;
+    pointer-events: none;
+    z-index: 5;
   }}
   /* Light text against dark background */
   #stage .nodeLabel, #stage .edgeLabel, #stage text {{
@@ -113,9 +180,20 @@ PAGE_HTML = f"""<!doctype html>
   <code>==></code> inherits &nbsp;
   <code>-.-</code> references
 </div>
-<div id='stage'>
-  <div class='empty'>
-    Click a node in the main graph to render its 1-hop Mermaid here.
+<div id='stage-wrap'>
+  <div id='stage'>
+    <div class='empty'>
+      Click a node in the main graph to render its 1-hop Mermaid here.
+    </div>
+  </div>
+  <div id='ctrl-hint'>scroll: zoom &middot; drag: pan &middot; dbl-click: reset</div>
+</div>
+<div id='explanation'>
+  <h4>About this diagram</h4>
+  <div id='explanation-body' class='empty'>
+    Pick a node to see a plain-language summary of what the diagram
+    shows. The summary is built from the graph data (no LLM), so it is
+    factually correct.
   </div>
 </div>
 <script>
@@ -140,20 +218,34 @@ PAGE_HTML = f"""<!doctype html>
   let _seq = 0;
   function setStatus(s) {{ document.getElementById('status').textContent = s; }}
 
-  window.gx_render = async function(text, status) {{
+  window.gx_render = async function(text, status, explanation) {{
     setStatus(status || 'rendering...');
-    const stage = document.getElementById('stage');
-    stage.innerHTML = '';
+    const stageEl = document.getElementById('stage');
+    stageEl.innerHTML = '';
     const id = 'gx-' + (++_seq);
     try {{
       const {{svg}} = await mermaid.render(id, text);
-      stage.innerHTML = svg;
+      stageEl.innerHTML = svg;
+      // Reset pan/zoom so every new diagram starts framed.
+      if (typeof window.gx_reset_view === 'function') window.gx_reset_view();
       setStatus(status || 'ready');
       if (window.pywebview) window.pywebview.api.on_rendered(true, '');
     }} catch (e) {{
-      stage.innerHTML = '<pre class=err>' + (e.message || String(e)) + '</pre>';
+      stageEl.innerHTML = '<pre class=err>' + (e.message || String(e)) + '</pre>';
       setStatus('render error');
       if (window.pywebview) window.pywebview.api.on_rendered(false, String(e));
+    }}
+    // Update the bottom explanation panel. `explanation` is HTML built
+    // by Python from the subgraph - factually correct by construction.
+    const expl = document.getElementById('explanation-body');
+    if (expl) {{
+      if (explanation && explanation.length) {{
+        expl.classList.remove('empty');
+        expl.innerHTML = explanation;
+      }} else {{
+        expl.classList.add('empty');
+        expl.textContent = 'No explanation available for this diagram.';
+      }}
     }}
   }};
 
@@ -161,7 +253,66 @@ PAGE_HTML = f"""<!doctype html>
     document.getElementById('stage').innerHTML =
       '<div class=empty>Click a node to render its diagram.</div>';
     setStatus('cleared');
+    resetTransform();
   }};
+
+  // ---- pan + zoom on the rendered SVG ---------------------------------
+  // Wraps the #stage div with translate+scale CSS transforms. Wheel
+  // zooms anchored at the cursor; drag pans; double-click resets.
+  let _scale = 1, _tx = 0, _ty = 0;
+  let _dragOrigin = null;
+  const stage = document.getElementById('stage');
+  const wrap = document.getElementById('stage-wrap');
+
+  function applyTransform() {{
+    stage.style.transform =
+      'translate(' + _tx + 'px,' + _ty + 'px) scale(' + _scale + ')';
+  }}
+
+  function resetTransform() {{
+    _scale = 1; _tx = 0; _ty = 0;
+    applyTransform();
+  }}
+  window.gx_reset_view = resetTransform;
+
+  wrap.addEventListener('wheel', function (e) {{
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+    const rect = wrap.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    // Keep the point under the cursor stationary.
+    _tx = x - (x - _tx) * factor;
+    _ty = y - (y - _ty) * factor;
+    _scale *= factor;
+    if (_scale < 0.05) _scale = 0.05;
+    if (_scale > 25)   _scale = 25;
+    applyTransform();
+  }}, {{ passive: false }});
+
+  wrap.addEventListener('mousedown', function (e) {{
+    if (e.button !== 0) return;
+    _dragOrigin = {{ x: e.clientX - _tx, y: e.clientY - _ty }};
+    wrap.classList.add('grabbing');
+    e.preventDefault();
+  }});
+
+  window.addEventListener('mousemove', function (e) {{
+    if (!_dragOrigin) return;
+    _tx = e.clientX - _dragOrigin.x;
+    _ty = e.clientY - _dragOrigin.y;
+    applyTransform();
+  }});
+
+  window.addEventListener('mouseup', function () {{
+    _dragOrigin = null;
+    wrap.classList.remove('grabbing');
+  }});
+
+  wrap.addEventListener('dblclick', function (e) {{
+    e.preventDefault();
+    resetTransform();
+  }});
 
   window.addEventListener('load', function () {{
     setStatus('ready');
@@ -217,11 +368,14 @@ def main() -> int:
             if cmd == "render":
                 text = msg.get("text") or ""
                 status = msg.get("status") or "ready"
-                # JSON-escape the text for safe JS injection.
+                explanation = msg.get("explanation") or ""
+                # JSON-escape each field for safe JS injection.
                 payload = json.dumps(text)
                 stat_payload = json.dumps(status)
+                expl_payload = json.dumps(explanation)
                 window.evaluate_js(
-                    f"window.gx_render && gx_render({payload}, {stat_payload})"
+                    "window.gx_render && gx_render("
+                    f"{payload}, {stat_payload}, {expl_payload})"
                 )
             elif cmd == "clear":
                 window.evaluate_js("window.gx_clear && gx_clear()")
