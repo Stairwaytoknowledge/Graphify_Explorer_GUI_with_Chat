@@ -20,7 +20,7 @@ The Interactive Graph view on [`pallets/click`](https://github.com/pallets/click
 (1,589 nodes, 5,630 edges, 14 communities):
 
 ![pallets/click graphified](docs/sample_image.png)
-![pallets/click graphified - alternate view](docs/sampele_image2.png)
+![pallets/click graphified - alternate view](docs/sample_image3.png)
 
 ## Install
 

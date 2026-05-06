@@ -43,24 +43,44 @@ if MERMAID_THEME not in ("default", "dark", "neutral", "forest", "base"):
 
 # Page background and text colors track the theme so the surrounding
 # chrome (status bar, explanation panel) doesn't clash with the diagram.
+# Defaults are picked per Mermaid theme; the parent GUI can override
+# any single value via GRAPHIFY_THEME_* env vars (which lets neon
+# palettes like cyberpunk propagate without expanding the theme name
+# enum here).
 if MERMAID_THEME == "default":
-    THEME_BG = "#f6f8fb"
-    THEME_PANEL = "#eef1f7"
-    THEME_PANEL_ALT = "#e2e7f0"
-    THEME_FG = "#1a2233"
-    THEME_FG_DIM = "#5b6678"
-    THEME_ACCENT = "#1e7fb8"
-    THEME_BORDER = "#aab4c3"
-    THEME_ERR = "#c0392b"
+    _DEFAULTS = {
+        "BG":        "#f6f8fb",
+        "PANEL":     "#eef1f7",
+        "PANEL_ALT": "#e2e7f0",
+        "FG":        "#1a2233",
+        "FG_DIM":    "#5b6678",
+        "ACCENT":    "#1e7fb8",
+        "BORDER":    "#aab4c3",
+        "ERR":       "#c0392b",
+    }
 else:
-    THEME_BG = "#162033"
-    THEME_PANEL = "#101826"
-    THEME_PANEL_ALT = "#1d2a40"
-    THEME_FG = "#e7ecf3"
-    THEME_FG_DIM = "#9aa6b8"
-    THEME_ACCENT = "#5ac6ff"
-    THEME_BORDER = "#1d2a40"
-    THEME_ERR = "#ff7a90"
+    _DEFAULTS = {
+        "BG":        "#162033",
+        "PANEL":     "#101826",
+        "PANEL_ALT": "#1d2a40",
+        "FG":        "#e7ecf3",
+        "FG_DIM":    "#9aa6b8",
+        "ACCENT":    "#5ac6ff",
+        "BORDER":    "#1d2a40",
+        "ERR":       "#ff7a90",
+    }
+
+def _theme_color(key: str) -> str:
+    return os.environ.get(f"GRAPHIFY_THEME_{key}", _DEFAULTS[key])
+
+THEME_BG        = _theme_color("BG")
+THEME_PANEL     = _theme_color("PANEL")
+THEME_PANEL_ALT = _theme_color("PANEL_ALT")
+THEME_FG        = _theme_color("FG")
+THEME_FG_DIM    = _theme_color("FG_DIM")
+THEME_ACCENT    = _theme_color("ACCENT")
+THEME_BORDER    = _theme_color("BORDER")
+THEME_ERR       = _DEFAULTS["ERR"]
 
 PAGE_HTML = f"""<!doctype html>
 <html lang='en'>

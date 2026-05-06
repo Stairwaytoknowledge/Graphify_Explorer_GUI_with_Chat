@@ -632,6 +632,7 @@ class GraphifyApp:
         for mode, label in (
             ("dark", "Dark"),
             ("light", "Light"),
+            ("cyberpunk", "Cyberpunk (neon)"),
             ("auto", "Auto (by time of day)"),
         ):
             view.add_radiobutton(
@@ -2242,14 +2243,28 @@ class GraphifyApp:
             )
             return
         try:
-            # Pass the active theme name so the Mermaid renderer can
-            # initialize its theme to match. Reload the diagram after a
-            # theme change to pick up the new colors.
+            # Pass the active theme to the Mermaid renderer. Cyberpunk
+            # is a dark-family palette but with neon colors that the
+            # renderer's hardcoded dark defaults don't match, so we also
+            # ship the resolved palette colors as env vars and the
+            # renderer prefers those over its built-ins.
             mermaid_theme = graphify_theme.mermaid_theme_for(
                 self._effective_theme
             )
             env = os.environ.copy()
             env["GRAPHIFY_MERMAID_THEME"] = mermaid_theme
+            for k, env_key in (
+                ("bg",        "GRAPHIFY_THEME_BG"),
+                ("panel",     "GRAPHIFY_THEME_PANEL"),
+                ("panel_alt", "GRAPHIFY_THEME_PANEL_ALT"),
+                ("fg",        "GRAPHIFY_THEME_FG"),
+                ("fg_dim",    "GRAPHIFY_THEME_FG_DIM"),
+                ("accent",    "GRAPHIFY_THEME_ACCENT"),
+                ("edge",      "GRAPHIFY_THEME_BORDER"),
+            ):
+                v = PALETTE.get(k)
+                if v:
+                    env[env_key] = v
             self.mermaid_proc = subprocess.Popen(
                 [sys.executable, str(script)],
                 stdin=subprocess.PIPE,

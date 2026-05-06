@@ -58,8 +58,27 @@ LIGHT_PALETTE: dict[str, str] = {
     "on_accent": "#ffffff",
 }
 
+# Cyberpunk: deep indigo / black backgrounds, neon cyan + hot magenta
+# accents, neon-mint success, electric-yellow warning. Tuned for high
+# contrast against the dark base while staying inside WCAG AA for the
+# fg/bg pair. Edge color reuses the magenta accent so graph edges read
+# as glowing neon when the palette is active.
+CYBERPUNK_PALETTE: dict[str, str] = {
+    "bg":        "#0a0418",
+    "panel":     "#120730",
+    "panel_alt": "#1c0d4a",
+    "fg":        "#f3e9ff",
+    "fg_dim":    "#b794f6",
+    "accent":    "#00f0ff",
+    "accent2":   "#ff2cf7",
+    "ok":        "#39ff14",
+    "warn":      "#fce700",
+    "edge":      "#ff2cf7",
+    "on_accent": "#0a0418",
+}
+
 # Recognised mode names. "auto" picks dark or light based on local time.
-VALID_MODES: tuple[str, ...] = ("dark", "light", "auto")
+VALID_MODES: tuple[str, ...] = ("dark", "light", "cyberpunk", "auto")
 DEFAULT_MODE = "dark"
 
 # Daytime window for auto mode (local time, 24-hour). 7:00 -> 19:00 is
@@ -81,6 +100,8 @@ def palette_for_mode(mode: str, now: datetime | None = None) -> dict[str, str]:
         return dict(LIGHT_PALETTE)
     if m == "dark":
         return dict(DARK_PALETTE)
+    if m == "cyberpunk":
+        return dict(CYBERPUNK_PALETTE)
     if m == "auto":
         return dict(LIGHT_PALETTE if is_daytime(now) else DARK_PALETTE)
     return dict(DARK_PALETTE)
@@ -93,7 +114,12 @@ def resolve_mode(mode: str) -> str:
 
 
 def effective_mode(mode: str, now: datetime | None = None) -> str:
-    """Resolve `mode` to either 'light' or 'dark' (auto picks one)."""
+    """Resolve `mode` to a concrete palette key.
+
+    'auto' collapses to either 'light' or 'dark' based on local time.
+    'cyberpunk' is a concrete dark-family palette and is returned as-is
+    so the Mermaid bridge picks the dark Mermaid theme.
+    """
     m = resolve_mode(mode)
     if m == "auto":
         return "light" if is_daytime(now) else "dark"
