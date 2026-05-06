@@ -257,5 +257,56 @@ class TokensTest(unittest.TestCase):
                          ["src", "auth", "utils"])
 
 
+class PopupResetTest(unittest.TestCase):
+    """Regression: the user sometimes saw the Entry "stuck and unable
+    to type". The popup's reset() recovers the Entry's typing focus
+    from any state it might have ended up in.
+    """
+
+    def test_reset_clears_suppress_flag(self) -> None:
+        import tkinter as tk
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            entry = tk.Entry(root)
+            popup = ac.AutocompletePopup(
+                master=root,
+                entry=entry,
+                candidate_provider=lambda: [],
+                on_select=lambda c: None,
+            )
+            popup._suppress_show = True
+            popup.reset()
+            self.assertFalse(popup._suppress_show)
+        finally:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+
+    def test_reset_cancels_pending_after(self) -> None:
+        import tkinter as tk
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            entry = tk.Entry(root)
+            popup = ac.AutocompletePopup(
+                master=root,
+                entry=entry,
+                candidate_provider=lambda: [],
+                on_select=lambda c: None,
+            )
+            # Schedule a fake pending refresh.
+            popup._after_id = root.after(99999, lambda: None)
+            self.assertIsNotNone(popup._after_id)
+            popup.reset()
+            self.assertIsNone(popup._after_id)
+        finally:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
