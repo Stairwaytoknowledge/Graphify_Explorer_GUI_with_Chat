@@ -53,6 +53,9 @@ from tkinter import (
 # available in the venv).
 import networkx as nx
 
+# Local module: partial+sparse git clone helpers and cache management.
+import graphify_clone
+
 
 APP_DIR = Path(__file__).resolve().parent
 ICON_ICO = APP_DIR / "icon.ico"
@@ -402,27 +405,9 @@ def cosine_topk(query_vec, vectors, k: int = 8):
     return [(int(i), float(sims[i])) for i in top]
 
 
-def derive_clone_dest(url: str) -> Path:
-    """Pick a deterministic local clone directory for a given git URL.
-
-    Mirrors graphify's own ~/.graphify/repos/<owner>/<repo> convention so
-    repeat clones land in the same place.
-    """
-    home = Path.home() / ".graphify" / "repos"
-    if url.startswith("git@"):
-        m = re.match(r"git@([^:]+):([^/]+)/(.+?)(?:\.git)?$", url)
-        if m:
-            _, owner, repo = m.groups()
-            return home / owner / repo
-    parsed = urlparse(url)
-    parts = [p for p in parsed.path.split("/") if p]
-    if len(parts) >= 2:
-        owner = parts[-2]
-        repo = parts[-1]
-        if repo.endswith(".git"):
-            repo = repo[:-4]
-        return home / owner / repo
-    return home / "unknown" / (parsed.netloc or "repo")
+# Re-exported from graphify_clone so existing callers and the CI test
+# (which calls graphify_gui.derive_clone_dest) keep working.
+derive_clone_dest = graphify_clone.derive_clone_dest
 
 
 # =============================================================== app
@@ -616,6 +601,22 @@ class GraphifyApp:
         ttk.Button(out_row, text="Clear", command=lambda: self.output_dir_var.set("")).pack(
             side=LEFT, padx=4
         )
+
+        # Cache row: shows current size of ~/.graphify/repos and a button
+        # to wipe it. Hidden until something has been cloned at least once.
+        cache_row = ttk.Frame(self.root)
+        cache_row.pack(side="top", fill="x", padx=12, pady=(0, 4))
+        self.cache_status_var = StringVar(value="")
+        self._cache_label = ttk.Label(
+            cache_row, textvariable=self.cache_status_var, style="Dim.TLabel"
+        )
+        self._cache_label.pack(side=LEFT, padx=(0, 6))
+        self._clear_cache_btn = ttk.Button(
+            cache_row, text="Clear cached repos",
+            command=self._clear_repo_cache,
+        )
+        self._clear_cache_btn.pack(side=LEFT, padx=4)
+        self._refresh_cache_status()
 
         actions = ttk.Frame(self.root)
         actions.pack(side="top", fill="x", padx=12, pady=(0, 8))
@@ -3712,7 +3713,14 @@ class GraphifyApp:
             )
 
     def _clone_then_graph(self, url: str) -> None:
-        """Clone (or pull) <url> into ~/.graphify/repos/..., then build the graph."""
+        """Clone (or pull) <url> into ~/.graphify/repos/..., then build the graph.
+
+        Fresh clones use --filter=blob:none + sparse-checkout limited to
+        source-file extensions (see graphify_clone.SOURCE_EXTENSIONS).
+        Effect: blobs that aren't source code (images, datasets,
+        node_modules, build artifacts) never download. On polyglot repos
+        this saves bandwidth and disk by 10x to 100x.
+        """
         if self.proc and self.proc.poll() is None:
             messagebox.showinfo("Busy", "A graphify command is already running.")
             return
@@ -3723,7 +3731,7 @@ class GraphifyApp:
                 "Install Git from https://git-scm.com/downloads and try again.",
             )
             return
-        dest = derive_clone_dest(url)
+        dest = graphify_clone.derive_clone_dest(url)
         dest.parent.mkdir(parents=True, exist_ok=True)
 
         # Make the destination visible up-front - users were missing where
@@ -3735,25 +3743,90 @@ class GraphifyApp:
         )
 
         already = dest.exists() and (dest / ".git").exists()
+        gv = graphify_clone.detect_git_version()
         if already:
-            cmd = ["git", "-C", str(dest), "pull", "--ff-only"]
+            self._clone_step_queue = [graphify_clone.build_pull_command(dest)]
+            label = "pulling latest"
             cwd = dest
         else:
             # Clean up partial clones from previous failed attempts.
             if dest.exists() and not (dest / ".git").exists():
                 shutil.rmtree(dest, ignore_errors=True)
-            cmd = ["git", "clone", "--depth", "1", url, str(dest)]
+            steps = graphify_clone.build_partial_sparse_commands(
+                url, dest, git_version=gv,
+            )
+            self._clone_step_queue = list(steps)
             cwd = dest.parent
+            if graphify_clone.supports_partial_clone(gv):
+                if graphify_clone.supports_sparse_checkout(gv):
+                    self._append(
+                        "Using partial clone + sparse-checkout "
+                        f"(extensions: {len(graphify_clone.SOURCE_EXTENSIONS)} "
+                        "source types). Non-source blobs will not be downloaded.\n",
+                        "dim",
+                    )
+                else:
+                    self._append(
+                        "Using partial clone with manual sparse-checkout.\n",
+                        "dim",
+                    )
+            else:
+                self._append(
+                    f"git {gv.major}.{gv.minor} is older than 2.19; "
+                    "using a plain shallow clone (no extension filter).\n",
+                    "warn",
+                )
+            label = "cloning"
 
+        # Run the queued steps one at a time. The reader thread + poll
+        # loop drives the chain via _then_clone_chain.
+        self._clone_step_cwd = cwd
+        self._clone_step_dest = dest
+        self._clone_step_needs_pattern_write = (
+            not already
+            and graphify_clone.supports_partial_clone(gv)
+            and not graphify_clone.supports_sparse_checkout(gv)
+        )
+        self._post_clone_dest = dest
+        self._begin_job(label=label, alert=False)
+        self._then_load = False
+        self._then_clone_chain = True
+        if not self._clone_step_queue:
+            # Defensive: should never happen, but don't deadlock.
+            self._then_clone_chain = False
+            self._end_job(False)
+            return
+        self._spawn_next_clone_step()
+
+    def _spawn_next_clone_step(self) -> bool:
+        """Pop and launch the next queued git command for the active clone.
+
+        Returns True if a step was started; False when the queue is empty
+        (caller should chain to `graphify update`).
+        """
+        if not getattr(self, "_clone_step_queue", None):
+            return False
+        cmd = self._clone_step_queue.pop(0)
+        cwd = self._clone_step_cwd
+        # If this step is `git checkout` and we're on the manual-pattern
+        # path (older git), write the patterns file first.
+        if (
+            self._clone_step_needs_pattern_write
+            and len(cmd) >= 4
+            and cmd[:3] == ["git", "-C", str(self._clone_step_dest)]
+            and cmd[3] == "checkout"
+        ):
+            try:
+                graphify_clone.write_sparse_patterns(self._clone_step_dest)
+                self._append("Wrote sparse-checkout pattern file.\n", "dim")
+            except OSError as exc:
+                self._append(
+                    f"warn: could not write sparse-checkout patterns: {exc}\n",
+                    "warn",
+                )
+            self._clone_step_needs_pattern_write = False
         self._append(f"$ {' '.join(shlex.quote(c) for c in cmd)}\n", "cmd")
         self._append(f"  (cwd: {cwd})\n", "dim")
-        self._begin_job(
-            label="cloning" if not already else "pulling latest",
-            alert=False,
-        )
-
-        # Stash the destination so the post-clone callback can chain `update`.
-        self._post_clone_dest = dest
         try:
             self.proc = subprocess.Popen(
                 cmd,
@@ -3767,12 +3840,54 @@ class GraphifyApp:
         except Exception as exc:
             self._append(f"[error] {exc}\n", "warn")
             self._set_status("Failed to start git.")
-            return
-        self._then_load = False
-        self._then_clone_chain = True
+            self._then_clone_chain = False
+            self._end_job(False)
+            return False
         threading.Thread(
             target=self._reader_thread, args=(self.proc,), daemon=True
         ).start()
+        return True
+
+    # ---- cache management ------------------------------------------------
+
+    def _refresh_cache_status(self) -> None:
+        """Update the cache status label + show/hide the clear button."""
+        try:
+            n = graphify_clone.cache_repo_count()
+            size = graphify_clone.cache_size_bytes()
+        except OSError:
+            n, size = 0, 0
+        if n == 0:
+            self.cache_status_var.set("No cached repos.")
+            self._clear_cache_btn.state(["disabled"])
+        else:
+            self.cache_status_var.set(
+                f"Cached repos: {n} ({graphify_clone.format_size(size)} on disk)"
+            )
+            self._clear_cache_btn.state(["!disabled"])
+
+    def _clear_repo_cache(self) -> None:
+        n = graphify_clone.cache_repo_count()
+        if n == 0:
+            messagebox.showinfo("Cache empty", "No cached repos to remove.")
+            self._refresh_cache_status()
+            return
+        size = graphify_clone.cache_size_bytes()
+        if not messagebox.askyesno(
+            "Clear cached repos",
+            f"Remove {n} cached repo(s) ({graphify_clone.format_size(size)}) "
+            f"from {graphify_clone.cache_root()}?\n\n"
+            "Already-built graphs in those repos will be lost too.\n"
+            "This cannot be undone.",
+        ):
+            return
+        freed = graphify_clone.clear_cache()
+        self._append(
+            f"Cleared {graphify_clone.format_size(freed)} from "
+            f"{graphify_clone.cache_root()}\n",
+            "ok",
+        )
+        self._refresh_cache_status()
 
     def _watch(self) -> None:
         path = self._selected_path()
@@ -4102,21 +4217,38 @@ class GraphifyApp:
                 if line.startswith("[exit "):
                     ok = "0]" in line
                     self._append(line, "ok" if ok else "warn")
-                    self._end_job(ok)
-                    if ok and getattr(self, "_then_clone_chain", False):
-                        # git clone/pull succeeded; switch path_var to the
-                        # cloned dir and run `graphify update` on it.
-                        self._then_clone_chain = False
-                        dest = getattr(self, "_post_clone_dest", None)
-                        if dest:
-                            self.path_var.set(str(dest))
-                            self._maybe_link_output(dest)
-                            self._run_graphify(
-                                ["update", str(dest)], cwd=dest, then_load=True
-                            )
-                    elif ok and getattr(self, "_then_load", False):
-                        self._then_load = False
-                        self._load_graph_into_view()
+                    if getattr(self, "_then_clone_chain", False):
+                        # We're inside a clone-chain. If more git steps
+                        # remain (e.g. sparse-checkout init -> set ->
+                        # checkout) keep going. Otherwise wrap up the
+                        # job and chain into `graphify update`.
+                        if not ok:
+                            self._then_clone_chain = False
+                            self._clone_step_queue = []
+                            self._end_job(False)
+                            self._refresh_cache_status()
+                        elif getattr(self, "_clone_step_queue", None):
+                            # Stay in the same job: don't end-job between
+                            # sub-steps so the timer keeps running.
+                            self._spawn_next_clone_step()
+                        else:
+                            self._end_job(True)
+                            self._then_clone_chain = False
+                            dest = getattr(self, "_post_clone_dest", None)
+                            self._refresh_cache_status()
+                            if dest:
+                                self.path_var.set(str(dest))
+                                self._maybe_link_output(dest)
+                                self._run_graphify(
+                                    ["update", str(dest)],
+                                    cwd=dest,
+                                    then_load=True,
+                                )
+                    else:
+                        self._end_job(ok)
+                        if ok and getattr(self, "_then_load", False):
+                            self._then_load = False
+                            self._load_graph_into_view()
                 else:
                     self._append(line)
         except queue.Empty:
