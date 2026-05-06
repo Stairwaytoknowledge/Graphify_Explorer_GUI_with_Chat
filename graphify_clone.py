@@ -173,17 +173,97 @@ def cache_repo_count(root: Path | None = None) -> int:
     return count
 
 
+def _force_remove_readonly(func, path, exc_info):
+    """rmtree onerror handler: clear the read-only bit and retry once.
+
+    Git pack files and the .git/objects/pack/* tree are typically
+    written read-only on Windows. shutil.rmtree's default error
+    handler can't delete read-only files; ignore_errors=True silently
+    leaves them behind, which is exactly the bug we're fixing.
+    """
+    import stat
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except OSError:
+        # Last resort: leave it for force_rmtree to retry, or raise.
+        raise
+
+
+def force_rmtree(path: Path) -> bool:
+    """Remove a tree, defeating Windows read-only and brief AV locks.
+
+    Returns True if the path is gone after this call. Performs up to
+    three retries with the read-only handler so packfiles, git index
+    locks, and antivirus scans don't leave stragglers behind.
+    """
+    if not path.exists():
+        return True
+    last_exc: BaseException | None = None
+    for _ in range(3):
+        try:
+            shutil.rmtree(path, onerror=_force_remove_readonly)
+        except OSError as exc:
+            last_exc = exc
+            # AV scans and stale handles are usually transient. Retry.
+            import time as _t
+            _t.sleep(0.05)
+            continue
+        if not path.exists():
+            return True
+    # Final pass: walk the tree, chmod every file, retry once.
+    try:
+        import stat
+        for dirpath, _dirs, files in os.walk(path):
+            for name in files:
+                fp = Path(dirpath) / name
+                try:
+                    os.chmod(fp, stat.S_IWRITE)
+                except OSError:
+                    pass
+        shutil.rmtree(path, ignore_errors=True)
+    except OSError:
+        pass
+    if path.exists() and last_exc is not None:
+        # We tried hard. Caller decides what to do with the residue.
+        return False
+    return not path.exists()
+
+
 def clear_cache(root: Path | None = None) -> int:
     """Remove the entire clone cache. Returns the number of bytes freed.
 
-    Always safe to call on a missing or partially populated cache.
+    Always safe to call on a missing or partially populated cache. Uses
+    force_rmtree so a read-only .git pack file (typical on Windows)
+    doesn't leave a half-deleted directory behind.
     """
     base = root if root is not None else cache_root()
     if not base.exists():
         return 0
     freed = cache_size_bytes(base)
-    shutil.rmtree(base, ignore_errors=True)
+    force_rmtree(base)
     return freed
+
+
+def has_working_tree(dest: Path) -> bool:
+    """True if `dest` is a git repo with checked-out files (not just .git).
+
+    Used to detect a half-completed partial clone where `git clone
+    --no-checkout` succeeded but the subsequent sparse-checkout +
+    `git checkout` step never ran. Such a directory has a `.git/`
+    subdir but no source files for graphify to parse, and pulling into
+    it doesn't recover.
+    """
+    if not (dest / ".git").exists():
+        return False
+    try:
+        for entry in dest.iterdir():
+            if entry.name == ".git":
+                continue
+            return True
+    except OSError:
+        return False
+    return False
 
 
 def format_size(n: int) -> str:

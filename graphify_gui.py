@@ -125,7 +125,13 @@ COMMUNITY_COLORS = [
 
 
 def graphify_executable() -> str | None:
-    """Find the `graphify` console script. Prefer the venv next to this file."""
+    """Find the `graphify` console script. Prefer the venv next to this file.
+
+    Note: on Windows under WDAC / AppLocker, the venv's graphify.exe is
+    a 47KB unsigned launcher stub that may be blocked. Callers should
+    use graphify_command() instead, which falls back to `python -m
+    graphify` via the same interpreter the GUI is running under.
+    """
     candidates: list[Path] = []
     venv = APP_DIR / ".venv"
     if os.name == "nt":
@@ -136,6 +142,74 @@ def graphify_executable() -> str | None:
         if c.exists():
             return str(c)
     return shutil.which("graphify")
+
+
+# Cached probe: True = stub runs; False = stub blocked or absent;
+# None = not yet probed.
+_GRAPHIFY_STUB_OK: bool | None = None
+
+
+def _probe_graphify_stub(exe: str) -> bool:
+    """Run `graphify.exe --version` once to see whether WDAC blocks it.
+
+    On Windows with Application Control, the venv stub raises
+    WinError 4551 ("An Application Control policy has blocked this
+    file") before the executable starts. A clean `--version` exit
+    means the stub is fine; any other outcome means we should fall
+    back to the python -m form.
+    """
+    try:
+        r = subprocess.run(
+            [exe, "--version"],
+            capture_output=True, text=True, timeout=10,
+            creationflags=_NO_CONSOLE_FLAGS,
+        )
+    except OSError:
+        return False
+    return r.returncode == 0
+
+
+def graphify_command(args: list[str] | None = None) -> tuple[list[str], dict[str, str]]:
+    """Return (argv, env_overrides) to invoke graphify with the given args.
+
+    Resolution order:
+        1. .venv/Scripts/graphify.exe (or .venv/bin/graphify on POSIX),
+           probed once with --version. WDAC-blocked stubs are detected
+           here and skipped.
+        2. `<sys.executable> -m graphify`, where sys.executable is the
+           interpreter that's currently running the GUI. graphify_gui.py
+           bootstraps .venv/Lib/site-packages onto sys.path before
+           anything else, so this works whether the GUI was launched
+           via the venv stub, the venv's home python, or a system
+           python that fell back when the stub was blocked.
+
+    Returns the argv list and a dict of environment overrides (currently
+    only PYTHONPATH so the subprocess can import graphifyy from the venv
+    site-packages even when the interpreter isn't itself the venv).
+    """
+    global _GRAPHIFY_STUB_OK
+    args = list(args or [])
+    exe = graphify_executable()
+    if exe and exe.lower().endswith((".exe", "graphify")):
+        if _GRAPHIFY_STUB_OK is None:
+            _GRAPHIFY_STUB_OK = _probe_graphify_stub(exe)
+        if _GRAPHIFY_STUB_OK:
+            return [exe, *args], {}
+    # Fallback: python -m graphify, with venv site-packages reachable.
+    env_overrides: dict[str, str] = {}
+    venv = APP_DIR / ".venv"
+    if os.name == "nt":
+        site = venv / "Lib" / "site-packages"
+    else:
+        py_libs = list((venv / "lib").glob("python*/site-packages")) \
+            if (venv / "lib").exists() else []
+        site = py_libs[0] if py_libs else None
+    if site and site.exists():
+        existing = os.environ.get("PYTHONPATH", "")
+        env_overrides["PYTHONPATH"] = (
+            f"{site}{os.pathsep}{existing}" if existing else str(site)
+        )
+    return [sys.executable, "-m", "graphify", *args], env_overrides
 
 
 # Detect whether the user typed a URL vs a local path.
@@ -3459,18 +3533,25 @@ class GraphifyApp:
     def _run_graphify_capture(
         self, args: list[str], cwd: Path | None, timeout: float = 30.0
     ) -> str:
-        """Synchronously run a graphify subcommand and return stdout."""
-        exe = graphify_executable()
-        if not exe or not cwd or not cwd.exists():
+        """Synchronously run a graphify subcommand and return stdout.
+
+        Uses graphify_command() so it survives WDAC-blocked stubs the
+        same way _run_graphify does.
+        """
+        if not cwd or not cwd.exists():
             return ""
+        cmd, env_overrides = graphify_command(args)
+        env = os.environ.copy()
+        env.update(env_overrides)
         try:
             r = subprocess.run(
-                [exe, *args],
+                cmd,
                 cwd=str(cwd),
                 capture_output=True,
                 text=True,
                 timeout=timeout,
                 creationflags=_NO_CONSOLE_FLAGS,
+                env=env,
             )
             return r.stdout or ""
         except Exception:
@@ -4143,16 +4224,33 @@ class GraphifyApp:
             f"Graph artifacts will land in: {dest / 'graphify-out'}\n", "dim"
         )
 
-        already = dest.exists() and (dest / ".git").exists()
+        # "already cloned" means: dest has .git AND has at least one
+        # checked-out file. A bare .git/ is the signature of a partial
+        # clone that aborted between `git clone --no-checkout` and
+        # `git checkout`; pulling into that doesn't recover, so we
+        # treat it as fresh and re-clone after force-removing the dir.
         gv = graphify_clone.detect_git_version()
+        already = (
+            dest.exists()
+            and (dest / ".git").exists()
+            and graphify_clone.has_working_tree(dest)
+        )
         if already:
             self._clone_step_queue = [graphify_clone.build_pull_command(dest)]
             label = "pulling latest"
             cwd = dest
         else:
-            # Clean up partial clones from previous failed attempts.
-            if dest.exists() and not (dest / ".git").exists():
-                shutil.rmtree(dest, ignore_errors=True)
+            # Clean up partial / stale clones from previous failed attempts.
+            # force_rmtree handles read-only .git packfiles on Windows.
+            if dest.exists():
+                if not graphify_clone.force_rmtree(dest):
+                    self._append(
+                        f"warn: could not fully remove {dest}; the next "
+                        "clone may fail. Try closing other apps that "
+                        "might have files open inside it (antivirus, "
+                        "code editors) and retry.\n",
+                        "warn",
+                    )
             steps = graphify_clone.build_partial_sparse_commands(
                 url, dest, git_version=gv,
             )
@@ -4601,8 +4699,9 @@ class GraphifyApp:
         if self.proc and self.proc.poll() is None:
             messagebox.showinfo("Busy", "A graphify command is already running.")
             return
-        exe = graphify_executable()
-        if not exe:
+        if not graphify_executable() and not (APP_DIR / ".venv" / "Lib" / "site-packages").exists():
+            # Neither the console-script stub nor an importable venv:
+            # the user almost certainly hasn't run the installer yet.
             messagebox.showerror(
                 "graphify not found",
                 "Could not locate the graphify CLI.\n\n"
@@ -4610,7 +4709,9 @@ class GraphifyApp:
                 "install-linux.sh first.",
             )
             return
-        cmd = [exe, *args]
+        cmd, env_overrides = graphify_command(args)
+        env = os.environ.copy()
+        env.update(env_overrides)
         self._append(f"$ {' '.join(shlex.quote(c) for c in cmd)}\n", "cmd")
         self._append(f"  (cwd: {cwd})\n", "dim")
         try:
@@ -4622,7 +4723,43 @@ class GraphifyApp:
                 text=True,
                 bufsize=1,
                 creationflags=_NO_CONSOLE_FLAGS,
+                env=env,
             )
+        except OSError as exc:
+            # WinError 4551 (WDAC) sneaks through here only if the stub
+            # probe initially passed but the real run is now blocked.
+            # Force the python -m fallback and retry once.
+            global _GRAPHIFY_STUB_OK
+            winerr = getattr(exc, "winerror", None)
+            if os.name == "nt" and winerr == 4551 and _GRAPHIFY_STUB_OK:
+                _GRAPHIFY_STUB_OK = False
+                self._append(
+                    "warn: graphify.exe was blocked by Application Control. "
+                    "Falling back to `python -m graphify`.\n",
+                    "warn",
+                )
+                cmd, env_overrides = graphify_command(args)
+                env = os.environ.copy()
+                env.update(env_overrides)
+                try:
+                    self.proc = subprocess.Popen(
+                        cmd,
+                        cwd=str(cwd),
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1,
+                        creationflags=_NO_CONSOLE_FLAGS,
+                        env=env,
+                    )
+                except Exception as exc2:
+                    self._append(f"[error] {exc2}\n", "warn")
+                    self._set_status("Failed to start graphify.")
+                    return
+            else:
+                self._append(f"[error] {exc}\n", "warn")
+                self._set_status("Failed to start graphify.")
+                return
         except Exception as exc:
             self._append(f"[error] {exc}\n", "warn")
             self._set_status("Failed to start graphify.")
