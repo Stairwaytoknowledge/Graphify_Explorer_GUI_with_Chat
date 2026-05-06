@@ -8,6 +8,47 @@ Depends on graphifyy from PyPI (https://github.com/safishamsi/graphify).
 
 from __future__ import annotations
 
+# ---------------------------------------------------------------------- bootstrap
+#
+# Some Windows installs run under WDAC / AppLocker, which blocks the
+# unsigned `python.exe` / `pythonw.exe` stubs that `python -m venv`
+# drops into `.venv\Scripts\`. The launchers (Graphify.vbs / .bat) try
+# the venv stub first and fall back to the system Python or the
+# venv's "home" interpreter when the stub is blocked. When that
+# fallback fires we are running under an interpreter that does NOT
+# have the venv's site-packages on its sys.path, so imports like
+# `webview` and `numpy` would fail.
+#
+# Detect that case and prepend the venv's site-packages explicitly,
+# before any optional dep is imported. The block is a no-op when we
+# are already inside the venv (sys.prefix already points at it).
+import sys as _sys
+import os as _os
+from pathlib import Path as _Path
+def _bootstrap_venv_sys_path() -> None:
+    app_dir = _Path(__file__).resolve().parent
+    venv_dir = app_dir / ".venv"
+    if not venv_dir.exists():
+        return
+    # Already inside the target venv? Nothing to do.
+    try:
+        if _Path(_sys.prefix).resolve() == venv_dir.resolve():
+            return
+    except OSError:
+        pass
+    # Layout differs slightly between OSes.
+    if _os.name == "nt":
+        site = venv_dir / "Lib" / "site-packages"
+    else:
+        # .venv/lib/python3.X/site-packages
+        py_libs = list((venv_dir / "lib").glob("python*/site-packages")) \
+            if (venv_dir / "lib").exists() else []
+        site = py_libs[0] if py_libs else None
+    if site and site.exists() and str(site) not in _sys.path:
+        _sys.path.insert(0, str(site))
+_bootstrap_venv_sys_path()
+# ----------------------------------------------------------------------
+
 import json
 import os
 import queue
