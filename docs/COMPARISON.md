@@ -13,10 +13,10 @@ machine; rerun to refresh.
 
 | Step | Time | Notes |
 | ---- | ---- | ----- |
-| clone | 1.15 s | git clone --depth 1 |
-| graph build | 0.44 s | graphify update . - 202 nodes, 378 edges |
-| graph query (raw nodes) | 0.24 s | graphify query - 86 output lines, no natural-language answer |
-| chat answer (natural language, on-prem) | 12.11 s | Ollama qwen2.5:3b-instruct-q4_K_M - 85 words, answer: Based on the provided context, Itsdangerous primarily protects against security vulnerabilities such as tampering and forgery of signed data... |
+| clone | 1.03 s | git clone --depth 1 |
+| graph build | 0.42 s | graphify update . - 202 nodes, 378 edges |
+| graph query (raw nodes) | 0.25 s | graphify query - 86 output lines, no natural-language answer |
+| chat answer (natural language, on-prem) | 4.99 s | Ollama qwen2.5:3b-instruct-q4_K_M - 56 words, answer: ItsDangerous in the context provided primarily deals with protecting data integrity and confidentiality through mechanisms like signing, ser... |
 
 Graph build time is the *control*: same engine either way, so
 the wrapper is neither faster nor slower at the engine work
