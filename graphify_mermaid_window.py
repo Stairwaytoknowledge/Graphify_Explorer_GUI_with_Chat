@@ -155,13 +155,29 @@ PAGE_HTML = f"""<!doctype html>
     left: 0;
     padding: 10px;
     transform-origin: 0 0;
+    /* GPU-composited transform avoids the subpixel blur Chromium/Edge
+       inflict on plain `transform: scale()`. translate3d forces the
+       layer onto its own compositor surface so the SVG stays sharp at
+       any zoom level. */
     will-change: transform;
+    backface-visibility: hidden;
+    -webkit-font-smoothing: antialiased;
+    transform: translate3d(0, 0, 0);
   }}
   #stage svg {{
     max-width: none;
     height: auto;
     background: transparent;
     user-select: none;
+    /* SVG is vector, but the WebView2 / WebKit compositor still picks
+       its rasterization at layer-creation time. These hints keep
+       shapes and labels crisp through the entire zoom range. */
+    shape-rendering: geometricPrecision;
+    text-rendering: geometricPrecision;
+    image-rendering: -webkit-optimize-contrast;
+  }}
+  #stage svg text {{
+    text-rendering: optimizeLegibility;
   }}
   #ctrl-hint {{
     position: absolute;
@@ -292,8 +308,15 @@ PAGE_HTML = f"""<!doctype html>
   const wrap = document.getElementById('stage-wrap');
 
   function applyTransform() {{
+    // Round to whole pixels so the SVG's text/edges fall on the device
+    // pixel grid; otherwise scale() drops us between pixels and the
+    // browser blurs to compensate. translate3d keeps the transform on
+    // the GPU compositor.
+    var dpr = window.devicePixelRatio || 1;
+    var tx = Math.round(_tx * dpr) / dpr;
+    var ty = Math.round(_ty * dpr) / dpr;
     stage.style.transform =
-      'translate(' + _tx + 'px,' + _ty + 'px) scale(' + _scale + ')';
+      'translate3d(' + tx + 'px,' + ty + 'px,0) scale(' + _scale + ')';
   }}
 
   function resetTransform() {{
