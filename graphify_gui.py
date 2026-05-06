@@ -55,6 +55,8 @@ import networkx as nx
 
 # Local module: partial+sparse git clone helpers and cache management.
 import graphify_clone
+# Local module: safe read-only mirror flow for remote / network mounts.
+import graphify_remote
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -110,15 +112,13 @@ def is_url(s: str) -> bool:
 
 
 def looks_like_network_path(s: str) -> bool:
-    """UNC, mapped network drive, or common SMB/NFS mount points."""
-    s = s.strip()
-    if s.startswith("\\\\") or s.startswith("//"):
-        return True  # Windows UNC or POSIX-style network share
-    if sys.platform == "darwin" and s.startswith("/Volumes/"):
-        return True
-    if sys.platform.startswith("linux") and s.startswith(("/mnt/", "/media/")):
-        return True
-    return False
+    """UNC, mapped network drive, or common SMB/NFS mount points.
+
+    Backward-compatible shim: the canonical detector now lives in
+    graphify_remote so the safety pipeline and the path-bar status
+    stay in agreement.
+    """
+    return graphify_remote.is_network_path(s)
 
 
 # Stdlib HTTP client for a locally-running Ollama daemon (used by the Chat
@@ -3624,11 +3624,12 @@ class GraphifyApp:
             if not silent:
                 messagebox.showerror("Missing", f"Path does not exist:\n{path}")
             return None
-        # Network-mounted paths work but warn about implications.
-        if looks_like_network_path(str(path)):
+        # Network-mounted paths trigger the safe read-only mirror flow
+        # on Build / Refresh; nothing is written to the share.
+        if graphify_remote.is_network_path(str(path)):
             self._set_status(
-                f"Network path detected ({path}); scans will be slower and "
-                "graphify-out/ writes back to the share."
+                f"Remote path detected ({path}); Build/Refresh will create "
+                "a local read-only mirror under ~/.graphify/mirror/."
             )
         return path
 
@@ -3643,8 +3644,130 @@ class GraphifyApp:
         path = self._selected_path()
         if not path:
             return
+        # Network mount? Route through the read-only mirror flow rather
+        # than letting graphify write its output back to the share.
+        if graphify_remote.is_network_path(str(path)):
+            mirror = self._mirror_remote_or_none(path)
+            if mirror is None:
+                # User cancelled or mirror was aborted. Status was set
+                # inside the helper.
+                return
+            # Switch the path field to the mirror so every downstream
+            # operation (load, query, browse, etc.) operates on the
+            # local copy. The status bar tells the user the mirror is
+            # standing in for the original remote path.
+            self.path_var.set(str(mirror))
+            path = mirror
         self._maybe_link_output(path)
         self._run_graphify(["update", str(path)], cwd=path, then_load=True)
+
+    def _mirror_remote_or_none(self, source: Path) -> Path | None:
+        """Build a read-only local mirror of `source` (a remote folder).
+
+        Returns the mirror path on success, or None if the user
+        cancelled, the source is too big, or anything went wrong. Pure
+        read on the source: PathGuard is engaged for the whole copy so
+        any write attempt to the share aborts loudly instead of
+        silently corrupting it.
+        """
+        # Pre-flight: estimate size before asking the user.
+        try:
+            est_files, est_bytes = graphify_remote.estimate_mirror_size(source)
+        except OSError as exc:
+            messagebox.showerror(
+                "Cannot read remote folder",
+                f"Failed to read {source}:\n{exc}",
+            )
+            return None
+
+        # Probe write capability on the share, not to enable writes but
+        # to surface the truth to the user. Result is informational
+        # only; we never write regardless.
+        writable = graphify_remote.remote_share_is_writable(source)
+        write_msg = {
+            True: "Share appears writable. We will not write to it anyway.",
+            False: "Share is read-only at the OS level (good).",
+            None: "Could not probe write capability.",
+        }[writable]
+
+        prompt = (
+            f"Detected a remote / network folder:\n  {source}\n\n"
+            f"For safety, Graphify will copy only source-code files "
+            f"({est_files} files, "
+            f"{graphify_remote.format_size(est_bytes)} estimated) to a "
+            f"local read-only mirror under "
+            f"{graphify_remote.mirror_root()}.\n\n"
+            f"The remote folder will be opened read-only. Build "
+            f"artifacts, datasets, and binaries are skipped.\n\n"
+            f"{write_msg}\n\n"
+            f"Proceed?"
+        )
+        if not messagebox.askyesno("Remote folder detected (safe mode)", prompt):
+            self._set_status("Remote mirror cancelled.")
+            return None
+
+        policy = graphify_remote.MirrorPolicy(user_consented=True)
+        self._switch_to_output_tab()
+        self._append(
+            f"Remote source: {source}\n"
+            f"Mirror target: {graphify_remote.mirror_path_for(source)}\n"
+            f"Policy: extensions={len(policy.extensions)}, "
+            f"max_files={policy.max_files}, "
+            f"max_total={graphify_remote.format_size(policy.max_total_bytes)}, "
+            f"per_file_max={graphify_remote.format_size(policy.per_file_max_bytes)}\n",
+            "ok",
+        )
+        self._set_status("Building read-only mirror...")
+        guard = graphify_remote.PathGuard(source)
+        try:
+            with guard:
+                report = graphify_remote.build_mirror(source, policy)
+        except graphify_remote.RemoteWriteAttempt as exc:
+            # The tripwire tripped. Refuse to proceed.
+            self._append(
+                f"[safety] BLOCKED: {exc}\n"
+                f"Aborting; the remote share has not been written to.\n",
+                "warn",
+            )
+            messagebox.showerror(
+                "Safety guard tripped",
+                "A write attempt against the remote folder was blocked. "
+                "Mirror aborted; no changes were made to the share.",
+            )
+            return None
+        except OSError as exc:
+            self._append(f"[mirror error] {exc}\n", "warn")
+            messagebox.showerror("Mirror failed", str(exc))
+            return None
+
+        if report.aborted_reason:
+            self._append(f"[mirror aborted] {report.aborted_reason}\n", "warn")
+            messagebox.showwarning(
+                "Source too large",
+                f"{report.aborted_reason}\n\n"
+                "Pick a smaller subtree of the share, or set "
+                "GRAPHIFY_MIRROR_MAX_BYTES / GRAPHIFY_MIRROR_MAX_FILES "
+                "to raise the limits.",
+            )
+            return None
+
+        self._append(
+            f"Mirrored {report.files_copied} files "
+            f"({graphify_remote.format_size(report.bytes_copied)}) "
+            f"in {report.elapsed_seconds:.1f}s. "
+            f"Skipped: {report.skipped_extension} non-source, "
+            f"{report.skipped_too_big} oversized.\n",
+            "ok",
+        )
+        if guard.attempts:
+            # Should be impossible given build_mirror only opens 'rb',
+            # but if something ever changes, surface it.
+            self._append(
+                f"[safety] {len(guard.attempts)} blocked write attempt(s):\n"
+                + "\n".join(f"  - {a}" for a in guard.attempts) + "\n",
+                "warn",
+            )
+        return report.mirror
 
     def _maybe_link_output(self, source: Path) -> None:
         """If the user picked a custom output directory, make graphify's
@@ -3851,40 +3974,70 @@ class GraphifyApp:
     # ---- cache management ------------------------------------------------
 
     def _refresh_cache_status(self) -> None:
-        """Update the cache status label + show/hide the clear button."""
+        """Update the cache status label + show/hide the clear button.
+
+        Aggregates two on-disk caches: cloned remote repos
+        (~/.graphify/repos) and read-only mirrors of network folders
+        (~/.graphify/mirror).
+        """
         try:
-            n = graphify_clone.cache_repo_count()
-            size = graphify_clone.cache_size_bytes()
+            n_repos = graphify_clone.cache_repo_count()
+            size_repos = graphify_clone.cache_size_bytes()
         except OSError:
-            n, size = 0, 0
-        if n == 0:
-            self.cache_status_var.set("No cached repos.")
+            n_repos, size_repos = 0, 0
+        try:
+            n_mirror, size_mirror = graphify_remote.mirror_count_and_size()
+        except OSError:
+            n_mirror, size_mirror = 0, 0
+        total = n_repos + n_mirror
+        size_total = size_repos + size_mirror
+        if total == 0:
+            self.cache_status_var.set("No cached repos or mirrors.")
             self._clear_cache_btn.state(["disabled"])
         else:
+            parts = []
+            if n_repos:
+                parts.append(
+                    f"{n_repos} clone(s) ({graphify_clone.format_size(size_repos)})"
+                )
+            if n_mirror:
+                parts.append(
+                    f"{n_mirror} mirror(s) ({graphify_clone.format_size(size_mirror)})"
+                )
             self.cache_status_var.set(
-                f"Cached repos: {n} ({graphify_clone.format_size(size)} on disk)"
+                "Cache: " + ", ".join(parts)
+                + f" - total {graphify_clone.format_size(size_total)}"
             )
             self._clear_cache_btn.state(["!disabled"])
 
     def _clear_repo_cache(self) -> None:
-        n = graphify_clone.cache_repo_count()
-        if n == 0:
-            messagebox.showinfo("Cache empty", "No cached repos to remove.")
+        n_repos = graphify_clone.cache_repo_count()
+        n_mirror, _ = graphify_remote.mirror_count_and_size()
+        size_total = (
+            graphify_clone.cache_size_bytes()
+            + graphify_remote.mirror_count_and_size()[1]
+        )
+        if n_repos == 0 and n_mirror == 0:
+            messagebox.showinfo("Cache empty", "No cached repos or mirrors to remove.")
             self._refresh_cache_status()
             return
-        size = graphify_clone.cache_size_bytes()
         if not messagebox.askyesno(
-            "Clear cached repos",
-            f"Remove {n} cached repo(s) ({graphify_clone.format_size(size)}) "
-            f"from {graphify_clone.cache_root()}?\n\n"
-            "Already-built graphs in those repos will be lost too.\n"
+            "Clear cache",
+            f"Remove {n_repos} cached clone(s) and {n_mirror} mirror(s) "
+            f"({graphify_clone.format_size(size_total)} total) from\n"
+            f"  {graphify_clone.cache_root()}\n"
+            f"  {graphify_remote.mirror_root()}\n\n"
+            "Already-built graphs in those caches will be lost too.\n"
+            "Source folders on the network are NOT touched.\n"
             "This cannot be undone.",
         ):
             return
-        freed = graphify_clone.clear_cache()
+        freed_repos = graphify_clone.clear_cache()
+        freed_mirror = graphify_remote.discard_mirror()
         self._append(
-            f"Cleared {graphify_clone.format_size(freed)} from "
-            f"{graphify_clone.cache_root()}\n",
+            f"Cleared {graphify_clone.format_size(freed_repos + freed_mirror)} "
+            f"({graphify_clone.format_size(freed_repos)} clones + "
+            f"{graphify_clone.format_size(freed_mirror)} mirrors).\n",
             "ok",
         )
         self._refresh_cache_status()

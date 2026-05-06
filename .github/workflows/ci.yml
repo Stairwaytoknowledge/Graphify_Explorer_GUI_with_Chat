@@ -143,6 +143,16 @@ jobs:
           fi
           PYTHONPATH=. "$PY" -m unittest -v tests.test_clone
 
+      - name: Safety tests for graphify_remote (read-only mirror + tripwire)
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            PY=".venv/Scripts/python.exe"
+          else
+            PY=".venv/bin/python"
+          fi
+          PYTHONPATH=. "$PY" -m unittest -v tests.test_remote
+
       - name: Unit tests for URL/path detection helpers
         shell: bash
         run: |
