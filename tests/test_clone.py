@@ -169,6 +169,92 @@ class CacheManagementTest(unittest.TestCase):
         nope = self.tmp / "does" / "not" / "exist"
         gc.clear_cache(nope)
 
+    def test_clear_removes_readonly_files(self) -> None:
+        # Mimics .git/objects/pack files which Windows git marks
+        # read-only. The old implementation used ignore_errors=True
+        # and silently left these behind, breaking the next clone.
+        import stat
+        d = self.tmp / "owner" / "repo" / ".git" / "objects" / "pack"
+        d.mkdir(parents=True)
+        f = d / "pack-deadbeef.idx"
+        f.write_bytes(b"\x00" * 256)
+        os.chmod(f, stat.S_IREAD)
+        try:
+            freed = gc.clear_cache(self.tmp)
+            self.assertGreaterEqual(freed, 256)
+            self.assertFalse(self.tmp.exists(),
+                             "read-only files left undeleted")
+        finally:
+            # If the test failed mid-flight, restore +w so tearDown can clean.
+            if f.exists():
+                os.chmod(f, stat.S_IWRITE)
+
+
+class ForceRmtreeTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="gxrm-"))
+
+    def tearDown(self) -> None:
+        # Belt-and-suspenders: tests should clean themselves up, but
+        # if they didn't, force the cleanup with mode-fix.
+        if self.tmp.exists():
+            gc.force_rmtree(self.tmp)
+
+    def test_returns_true_when_missing(self) -> None:
+        nope = self.tmp / "missing"
+        self.assertTrue(gc.force_rmtree(nope))
+
+    def test_removes_normal_dir(self) -> None:
+        d = self.tmp / "x"
+        d.mkdir()
+        (d / "a.txt").write_text("hi")
+        self.assertTrue(gc.force_rmtree(d))
+        self.assertFalse(d.exists())
+
+    def test_removes_readonly_file(self) -> None:
+        import stat
+        d = self.tmp / "x"
+        d.mkdir()
+        f = d / "ro.txt"
+        f.write_text("hi")
+        os.chmod(f, stat.S_IREAD)
+        try:
+            self.assertTrue(gc.force_rmtree(d))
+            self.assertFalse(d.exists())
+        finally:
+            if f.exists():
+                os.chmod(f, stat.S_IWRITE)
+
+
+class HasWorkingTreeTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="gxwt-"))
+
+    def tearDown(self) -> None:
+        gc.force_rmtree(self.tmp)
+
+    def test_no_dot_git(self) -> None:
+        # Plain dir with files but no .git -> not a repo at all.
+        (self.tmp / "a.py").write_text("x")
+        self.assertFalse(gc.has_working_tree(self.tmp))
+
+    def test_only_dot_git_no_working_tree(self) -> None:
+        # The half-clone case: --no-checkout left only .git.
+        (self.tmp / ".git").mkdir()
+        self.assertFalse(gc.has_working_tree(self.tmp))
+
+    def test_dot_git_plus_files(self) -> None:
+        # Real repo with checked-out files.
+        (self.tmp / ".git").mkdir()
+        (self.tmp / "main.py").write_text("print(1)")
+        self.assertTrue(gc.has_working_tree(self.tmp))
+
+    def test_dot_git_plus_subdir(self) -> None:
+        # A subdir at the top level still counts as working tree.
+        (self.tmp / ".git").mkdir()
+        (self.tmp / "src").mkdir()
+        self.assertTrue(gc.has_working_tree(self.tmp))
+
 
 class FormatSizeTest(unittest.TestCase):
     def test_bytes(self) -> None:
