@@ -133,6 +133,16 @@ jobs:
           "../$GRAPHIFY" explain "hello()"
           echo "End-to-end OK"
 
+      - name: Unit tests for graphify_clone (partial+sparse + cache)
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            PY=".venv/Scripts/python.exe"
+          else
+            PY=".venv/bin/python"
+          fi
+          PYTHONPATH=. "$PY" -m unittest -v tests.test_clone
+
       - name: Unit tests for URL/path detection helpers
         shell: bash
         run: |
