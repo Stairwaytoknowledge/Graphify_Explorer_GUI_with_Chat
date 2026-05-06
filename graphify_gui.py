@@ -23,6 +23,13 @@ import urllib.error
 import urllib.request
 import webbrowser
 from pathlib import Path
+
+# Suppress the brief console-window flash that Windows shows when we spawn
+# a child python.exe / git / etc. via subprocess. Windows-only; 0 on
+# Mac/Linux is a no-op.
+_NO_CONSOLE_FLAGS = (
+    getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+)
 from urllib.parse import urlparse
 import tkinter as tk
 from tkinter import (
@@ -1996,6 +2003,7 @@ class GraphifyApp:
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                creationflags=_NO_CONSOLE_FLAGS,
             )
         except Exception as exc:
             self.mermaid_status_var.set(f"failed to start: {exc}")
@@ -3192,6 +3200,7 @@ class GraphifyApp:
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                creationflags=_NO_CONSOLE_FLAGS,
             )
             return r.stdout or ""
         except Exception:
@@ -3351,6 +3360,7 @@ class GraphifyApp:
             r = subprocess.run(
                 [sys.executable, "-c", "import webview"],
                 capture_output=True, text=True, timeout=10,
+                creationflags=_NO_CONSOLE_FLAGS,
             )
             if r.returncode != 0:
                 self.viz_status_var.set(
@@ -3685,6 +3695,7 @@ class GraphifyApp:
                 r = subprocess.run(
                     ["cmd", "/c", "mklink", "/J", str(link), str(custom_path)],
                     capture_output=True, text=True,
+                    creationflags=_NO_CONSOLE_FLAGS,
                 )
                 if r.returncode != 0:
                     raise OSError(r.stderr.strip() or "mklink failed")
@@ -3751,6 +3762,7 @@ class GraphifyApp:
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                creationflags=_NO_CONSOLE_FLAGS,
             )
         except Exception as exc:
             self._append(f"[error] {exc}\n", "warn")
@@ -3847,6 +3859,7 @@ class GraphifyApp:
             r = subprocess.run(
                 [sys.executable, "-c", "import webview"],
                 capture_output=True, text=True, timeout=10,
+                creationflags=_NO_CONSOLE_FLAGS,
             )
         except Exception as exc:
             messagebox.showerror("pywebview check failed", str(exc))
@@ -3871,6 +3884,7 @@ class GraphifyApp:
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                creationflags=_NO_CONSOLE_FLAGS,
             )
         except Exception as exc:
             messagebox.showerror("Failed to start", f"{exc}")
@@ -3879,6 +3893,14 @@ class GraphifyApp:
         threading.Thread(
             target=self._vis_event_loop, daemon=True
         ).start()
+        # On Windows, reparent the popup into the left-pane embed frame.
+        # Used to live only in _open_interactive_view_quiet, so the
+        # "Reopen Graph" button (which calls this method directly when
+        # the subprocess is closed) was leaving the window floating
+        # outside the GUI. Now both paths embed.
+        if os.name == "nt":
+            self._embed_poll_count = 0
+            self.root.after(500, self._embed_poll_tick)
 
     def _vis_event_loop(self) -> None:
         """Read JSON events from the subprocess and dispatch to the main
@@ -4053,6 +4075,7 @@ class GraphifyApp:
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                creationflags=_NO_CONSOLE_FLAGS,
             )
         except Exception as exc:
             self._append(f"[error] {exc}\n", "warn")
