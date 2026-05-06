@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import threading
+from html import escape as html_escape
 import time
 import urllib.error
 import urllib.request
@@ -1217,6 +1218,125 @@ class GraphifyApp:
         s = re.sub(r"\W+", "_", str(s))
         return s[:50] or "n"
 
+    def _mermaid_explain_subgraph(
+        self, G, center: str | None = None, scope: str = "1-hop"
+    ) -> str:
+        """Build a plain-language explanation of what the diagram shows.
+
+        Deterministic: walks the actual subgraph and reports what's
+        there. No LLM, no inference, no risk of hallucination."""
+        from collections import Counter
+
+        if G is None or G.number_of_nodes() == 0:
+            return ""
+
+        n_nodes = G.number_of_nodes()
+        n_edges = G.number_of_edges()
+        full_graph = self.graph
+
+        def safe(s: str) -> str:
+            return html_escape(str(s))
+
+        def node_label(n: str) -> str:
+            attrs = G.nodes.get(n, {})
+            return safe(attrs.get("label") or n)
+
+        # Header: what we're looking at.
+        parts: list[str] = []
+        if center and center in G:
+            attrs = G.nodes[center]
+            label = node_label(center)
+            src = safe(attrs.get("source_file") or "?")
+            loc = safe(attrs.get("source_location") or "")
+            scope_text = {
+                "1-hop": "1-hop neighbourhood",
+                "2-hop": "2-hop neighbourhood",
+                "community": "community",
+                "file": "file contents",
+            }.get(scope, scope)
+            parts.append(
+                f"<p>This diagram shows the <b>{safe(scope_text)}</b> of "
+                f"<code>{label}</code> "
+                f"(in <code>{src}</code>{(' line ' + loc) if loc else ''}).</p>"
+            )
+        else:
+            parts.append("<p>This diagram shows a slice of the graph.</p>")
+
+        parts.append(
+            f"<p>It contains <b>{n_nodes}</b> "
+            f"node{'s' if n_nodes != 1 else ''} and "
+            f"<b>{n_edges}</b> edge{'s' if n_edges != 1 else ''}.</p>"
+        )
+
+        # Communities present.
+        comms: Counter = Counter()
+        for _, a in G.nodes(data=True):
+            c = a.get("community")
+            if c is not None:
+                comms[int(c)] += 1
+        if comms:
+            comm_list = ", ".join(
+                f"{cid} ({cnt} node{'s' if cnt != 1 else ''})"
+                for cid, cnt in sorted(comms.items())
+            )
+            parts.append(
+                f"<p><b>Communities present:</b> {safe(comm_list)}</p>"
+            )
+
+        # Edge type breakdown.
+        rel_counts: Counter = Counter()
+        for _, _, ed in G.edges(data=True):
+            rel = (ed.get("relation") or "").strip() or "(unlabeled)"
+            rel_counts[rel] += 1
+        if rel_counts:
+            rels_summary = ", ".join(
+                f"{cnt} {safe(rel)}"
+                for rel, cnt in rel_counts.most_common()
+            )
+            parts.append(f"<p><b>Edge types:</b> {rels_summary}</p>")
+
+        # Direct relationships from the centre node (if one exists).
+        if center and center in G:
+            outs: list[tuple[str, str, str]] = []
+            for nb in G.neighbors(center):
+                ed = G.get_edge_data(center, nb) or {}
+                rel = (ed.get("relation") or "").strip() or "related to"
+                outs.append((center, rel, nb))
+            if outs:
+                parts.append("<p><b>Direct relationships:</b></p><ul>")
+                for u, rel, v in outs[:10]:
+                    parts.append(
+                        f"<li><code>{node_label(u)}</code> "
+                        f"<i>{safe(rel)}</i> "
+                        f"<code>{node_label(v)}</code></li>"
+                    )
+                if len(outs) > 10:
+                    parts.append(
+                        f"<li>... and {len(outs) - 10} more</li>"
+                    )
+                parts.append("</ul>")
+
+        # Most-connected node within this subgraph (helpful for >1-hop scopes).
+        if n_nodes > 2:
+            degrees = sorted(G.degree, key=lambda x: -x[1])
+            top_n, top_d = degrees[0]
+            if top_n != center:
+                parts.append(
+                    f"<p>The most connected node in this slice is "
+                    f"<code>{node_label(top_n)}</code> "
+                    f"({top_d} connections within this view).</p>"
+                )
+
+        # Caveat if the subgraph was capped by the renderer.
+        if full_graph and n_nodes > 40:
+            parts.append(
+                "<p><i>Note:</i> the diagram itself shows the top 40 "
+                "nodes by degree to stay readable; this summary covers "
+                "the full slice.</p>"
+            )
+
+        return "\n".join(parts)
+
     @staticmethod
     def _mermaid_safe_label(raw, fallback: str = "") -> str:
         """Strip every character that Mermaid 10's flowchart parser dislikes
@@ -1773,13 +1893,20 @@ class GraphifyApp:
             side=LEFT, padx=(0, 6)
         )
         self.mermaid_scope_var = StringVar(value="1-hop")
-        ttk.Combobox(
+        scope_combo = ttk.Combobox(
             scope_row,
             textvariable=self.mermaid_scope_var,
             values=["1-hop", "2-hop", "community", "file"],
             state="readonly",
             width=12,
-        ).pack(side=LEFT)
+        )
+        scope_combo.pack(side=LEFT)
+        # Re-render immediately when the user picks a different scope -
+        # no need to click Refresh after.
+        scope_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda _e: self._mermaid_refresh(),
+        )
         ttk.Button(
             scope_row, text="Refresh",
             command=self._mermaid_refresh,
@@ -1832,7 +1959,9 @@ class GraphifyApp:
         # State
         self.mermaid_proc = None
         self._last_mermaid_text: str = ""
+        self._last_mermaid_explanation: str = ""
         self._mermaid_pending_text: str | None = None
+        self._mermaid_pending_explanation: str = ""
         self._mermaid_debounce_after: str | None = None
         # We can only call the JS gx_render() once the subprocess emits
         # `ready` (which fires after mermaid.js finishes loading). Until
@@ -1921,7 +2050,9 @@ class GraphifyApp:
                     pass
         self.root.after(0, _on_exit)
 
-    def _mermaid_send_text(self, text: str) -> None:
+    def _mermaid_send_text(
+        self, text: str, explanation: str = ""
+    ) -> None:
         proc = getattr(self, "mermaid_proc", None)
         # Two reasons to queue instead of send right now:
         #   1. Subprocess isn't running yet -> spawn will read the queue
@@ -1937,21 +2068,28 @@ class GraphifyApp:
             or not self._mermaid_ready
         ):
             self._mermaid_pending_text = text
+            self._mermaid_pending_explanation = explanation
             return
         try:
             proc.stdin.write(json.dumps({
                 "cmd": "render", "text": text,
                 "status": "rendered",
+                "explanation": explanation,
             }) + "\n")
             proc.stdin.flush()
             self._last_mermaid_text = text
+            self._last_mermaid_explanation = explanation
         except (OSError, BrokenPipeError):
             pass
 
     def _mermaid_flush_pending(self) -> None:
         if self._mermaid_pending_text:
-            self._mermaid_send_text(self._mermaid_pending_text)
+            self._mermaid_send_text(
+                self._mermaid_pending_text,
+                self._mermaid_pending_explanation,
+            )
             self._mermaid_pending_text = None
+            self._mermaid_pending_explanation = ""
 
     # ---- selection-driven update ----------------------------------------
 
@@ -1978,7 +2116,10 @@ class GraphifyApp:
         if sub is None or sub.number_of_nodes() == 0:
             return
         text = self._graph_to_mermaid_annotated(sub, max_nodes=40)
-        self._mermaid_send_text(text)
+        explanation = self._mermaid_explain_subgraph(
+            sub, center=node_id, scope=self.mermaid_scope_var.get(),
+        )
+        self._mermaid_send_text(text, explanation)
         # Auto-spawn the subprocess if it's not running yet.
         if not getattr(self, "mermaid_proc", None) \
                 or self.mermaid_proc.poll() is not None:
