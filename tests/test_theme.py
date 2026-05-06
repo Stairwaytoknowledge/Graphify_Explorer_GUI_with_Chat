@@ -16,10 +16,14 @@ import graphify_theme as gt  # noqa: E402
 
 class PaletteShapeTest(unittest.TestCase):
     def test_keys_match_across_palettes(self) -> None:
-        # Every key in DARK must also be in LIGHT and vice versa.
+        # Every key in DARK must also be in LIGHT and CYBERPUNK.
         self.assertEqual(
             set(gt.DARK_PALETTE.keys()),
             set(gt.LIGHT_PALETTE.keys()),
+        )
+        self.assertEqual(
+            set(gt.DARK_PALETTE.keys()),
+            set(gt.CYBERPUNK_PALETTE.keys()),
         )
 
     def test_palette_for_dark(self) -> None:
@@ -27,6 +31,9 @@ class PaletteShapeTest(unittest.TestCase):
 
     def test_palette_for_light(self) -> None:
         self.assertEqual(gt.palette_for_mode("light"), gt.LIGHT_PALETTE)
+
+    def test_palette_for_cyberpunk(self) -> None:
+        self.assertEqual(gt.palette_for_mode("cyberpunk"), gt.CYBERPUNK_PALETTE)
 
     def test_palette_unknown_falls_back(self) -> None:
         # Unknown mode strings fall back to dark.
@@ -48,6 +55,12 @@ class PaletteShapeTest(unittest.TestCase):
         }
         self.assertTrue(required.issubset(set(gt.DARK_PALETTE.keys())))
         self.assertTrue(required.issubset(set(gt.LIGHT_PALETTE.keys())))
+        self.assertTrue(required.issubset(set(gt.CYBERPUNK_PALETTE.keys())))
+
+    def test_cyberpunk_is_dark_family(self) -> None:
+        # Sanity check on the cyberpunk bg luma so the Mermaid bridge
+        # picks the dark Mermaid theme rather than the light one.
+        self.assertFalse(gt._is_light(gt.CYBERPUNK_PALETTE["bg"]))
 
 
 class AutoModeTest(unittest.TestCase):
@@ -97,6 +110,12 @@ class ResolveModeTest(unittest.TestCase):
         self.assertEqual(gt.resolve_mode("dark"), "dark")
         self.assertEqual(gt.resolve_mode("light"), "light")
         self.assertEqual(gt.resolve_mode("auto"), "auto")
+        self.assertEqual(gt.resolve_mode("cyberpunk"), "cyberpunk")
+
+    def test_effective_mode_passes_cyberpunk(self) -> None:
+        # Cyberpunk is a concrete palette so effective_mode returns it
+        # as-is. The Mermaid bridge then uses bg luma to pick "dark".
+        self.assertEqual(gt.effective_mode("cyberpunk"), "cyberpunk")
 
     def test_normalize(self) -> None:
         self.assertEqual(gt.resolve_mode("  Dark  "), "dark")
@@ -162,6 +181,11 @@ class MermaidThemeTest(unittest.TestCase):
 
     def test_light_mode_string(self) -> None:
         self.assertEqual(gt.mermaid_theme_for("light"), "default")
+
+    def test_cyberpunk_palette_to_dark_theme(self) -> None:
+        # Bg luma is below the threshold so the dark Mermaid theme is
+        # chosen; the actual neon colors are passed via env vars.
+        self.assertEqual(gt.mermaid_theme_for(gt.CYBERPUNK_PALETTE), "dark")
 
     def test_is_light_helper(self) -> None:
         self.assertTrue(gt._is_light("#ffffff"))
