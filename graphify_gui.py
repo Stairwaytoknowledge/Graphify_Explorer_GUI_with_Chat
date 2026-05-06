@@ -212,6 +212,47 @@ def graphify_command(args: list[str] | None = None) -> tuple[list[str], dict[str
     return [sys.executable, "-m", "graphify", *args], env_overrides
 
 
+def _venv_site_packages() -> Path | None:
+    """Return the venv's site-packages directory if one exists.
+
+    Used by every helper that spawns a child python (vis.js viewer,
+    mermaid viewer, pywebview probes). When the GUI is running under
+    the venv stub, sys.executable already finds these packages on its
+    own. When the launcher fell back to the venv home python or a
+    system python (because WDAC blocked the stub), the child needs
+    PYTHONPATH set explicitly or `import webview` fails.
+    """
+    venv = APP_DIR / ".venv"
+    if not venv.exists():
+        return None
+    if os.name == "nt":
+        sp = venv / "Lib" / "site-packages"
+        return sp if sp.exists() else None
+    cands = list((venv / "lib").glob("python*/site-packages")) \
+        if (venv / "lib").exists() else []
+    return cands[0] if cands else None
+
+
+def helper_subprocess_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """os.environ.copy() with .venv/site-packages prepended to PYTHONPATH.
+
+    Pass this `env=` to any subprocess that runs python (vis.js viewer,
+    mermaid viewer, `python -c "import webview"` probes) so they can
+    import the venv's installed packages even when sys.executable
+    lives outside the venv (WDAC-fallback path).
+    """
+    env = os.environ.copy()
+    site = _venv_site_packages()
+    if site:
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (
+            f"{site}{os.pathsep}{existing}" if existing else str(site)
+        )
+    if extra:
+        env.update(extra)
+    return env
+
+
 # Detect whether the user typed a URL vs a local path.
 URL_RE = re.compile(r"^(https?://|git@|ssh://|git://)", re.IGNORECASE)
 # SCP-style git URL: user@host:path/to/repo(.git)?  (no scheme prefix)
@@ -2325,8 +2366,7 @@ class GraphifyApp:
             mermaid_theme = graphify_theme.mermaid_theme_for(
                 self._effective_theme
             )
-            env = os.environ.copy()
-            env["GRAPHIFY_MERMAID_THEME"] = mermaid_theme
+            extra: dict[str, str] = {"GRAPHIFY_MERMAID_THEME": mermaid_theme}
             for k, env_key in (
                 ("bg",        "GRAPHIFY_THEME_BG"),
                 ("panel",     "GRAPHIFY_THEME_PANEL"),
@@ -2338,7 +2378,11 @@ class GraphifyApp:
             ):
                 v = PALETTE.get(k)
                 if v:
-                    env[env_key] = v
+                    extra[env_key] = v
+            # helper_subprocess_env adds .venv/Lib/site-packages to
+            # PYTHONPATH so `import webview` works under the home python
+            # (WDAC fallback path).
+            env = helper_subprocess_env(extra)
             self.mermaid_proc = subprocess.Popen(
                 [sys.executable, str(script)],
                 stdin=subprocess.PIPE,
@@ -3721,6 +3765,7 @@ class GraphifyApp:
                 [sys.executable, "-c", "import webview"],
                 capture_output=True, text=True, timeout=10,
                 creationflags=_NO_CONSOLE_FLAGS,
+                env=helper_subprocess_env(),
             )
             if r.returncode != 0:
                 self.viz_status_var.set(
@@ -4504,6 +4549,7 @@ class GraphifyApp:
                 [sys.executable, "-c", "import webview"],
                 capture_output=True, text=True, timeout=10,
                 creationflags=_NO_CONSOLE_FLAGS,
+                env=helper_subprocess_env(),
             )
         except Exception as exc:
             messagebox.showerror("pywebview check failed", str(exc))
@@ -4529,6 +4575,7 @@ class GraphifyApp:
                 text=True,
                 bufsize=1,
                 creationflags=_NO_CONSOLE_FLAGS,
+                env=helper_subprocess_env(),
             )
         except Exception as exc:
             messagebox.showerror("Failed to start", f"{exc}")
