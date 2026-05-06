@@ -269,6 +269,34 @@ PAGE_HTML = f"""<!doctype html>
     try {{
       const {{svg}} = await mermaid.render(id, text);
       stageEl.innerHTML = svg;
+      // Capture the SVG's natural width/height so zoom can resize it
+      // by setting attributes (re-rasterize at new resolution) instead
+      // of CSS scale (bitmap-stretch the original raster, which blurs).
+      const svgEl = stageEl.querySelector('svg');
+      if (svgEl) {{
+        // Mermaid often emits style="max-width:Xpx" + height:auto; clear
+        // those so our explicit width/height attributes drive the layout.
+        svgEl.style.maxWidth = 'none';
+        svgEl.style.width = '';
+        svgEl.style.height = '';
+        const vb = svgEl.getAttribute('viewBox');
+        if (vb) {{
+          const parts = vb.split(/[\s,]+/).map(parseFloat);
+          if (parts.length === 4) {{
+            _baseW = parts[2];
+            _baseH = parts[3];
+          }}
+        }}
+        if (!_baseW || !_baseH) {{
+          const r = svgEl.getBoundingClientRect();
+          _baseW = r.width || 800;
+          _baseH = r.height || 600;
+        }}
+        svgEl.setAttribute('width',  _baseW + 'px');
+        svgEl.setAttribute('height', _baseH + 'px');
+      }} else {{
+        _baseW = 0; _baseH = 0;
+      }}
       // Reset pan/zoom so every new diagram starts framed.
       if (typeof window.gx_reset_view === 'function') window.gx_reset_view();
       setStatus(status || 'ready');
@@ -300,30 +328,63 @@ PAGE_HTML = f"""<!doctype html>
   }};
 
   // ---- pan + zoom on the rendered SVG ---------------------------------
-  // Wraps the #stage div with translate+scale CSS transforms. Wheel
-  // zooms anchored at the cursor; drag pans; double-click resets.
+  //
+  // Zoom is implemented by RESIZING the SVG (via its width/height
+  // attributes) instead of CSS-scaling its parent div. CSS
+  // transform: scale() rasterizes the SVG once at its natural size and
+  // then bitmap-stretches that texture, which blurs labels and edges.
+  // Setting SVG width/height makes the browser re-rasterize at the new
+  // resolution, so vectors stay crisp at any zoom level.
+  //
+  // Pan is a plain translate on the wrapper div.
   let _scale = 1, _tx = 0, _ty = 0;
+  let _baseW = 0, _baseH = 0;
   let _dragOrigin = null;
   const stage = document.getElementById('stage');
   const wrap = document.getElementById('stage-wrap');
 
   function applyTransform() {{
-    // Round to whole pixels so the SVG's text/edges fall on the device
-    // pixel grid; otherwise scale() drops us between pixels and the
-    // browser blurs to compensate. translate3d keeps the transform on
-    // the GPU compositor.
+    // Pan: translate on the stage div, no scale.
     var dpr = window.devicePixelRatio || 1;
     var tx = Math.round(_tx * dpr) / dpr;
     var ty = Math.round(_ty * dpr) / dpr;
-    stage.style.transform =
-      'translate3d(' + tx + 'px,' + ty + 'px,0) scale(' + _scale + ')';
+    stage.style.transform = 'translate3d(' + tx + 'px,' + ty + 'px,0)';
+    // Zoom: set the SVG's intrinsic size. The browser re-rasterizes at
+    // the new size, no bitmap stretch.
+    const svgEl = stage.querySelector('svg');
+    if (svgEl && _baseW && _baseH) {{
+      svgEl.setAttribute('width',  Math.round(_baseW * _scale) + 'px');
+      svgEl.setAttribute('height', Math.round(_baseH * _scale) + 'px');
+    }}
   }}
 
   function resetTransform() {{
     _scale = 1; _tx = 0; _ty = 0;
     applyTransform();
   }}
-  window.gx_reset_view = resetTransform;
+
+  function fitToWindow() {{
+    // Pick a scale that fills the wrapper while keeping aspect ratio,
+    // then center the diagram so it sits in the middle of the pane.
+    // Called after every render so the user sees the diagram at its
+    // optimal size without having to zoom.
+    if (!_baseW || !_baseH) {{ resetTransform(); return; }}
+    const wrapRect = wrap.getBoundingClientRect();
+    const PAD = 24;
+    const availW = Math.max(100, wrapRect.width  - PAD * 2);
+    const availH = Math.max(100, wrapRect.height - PAD * 2);
+    // Cap upper zoom so a tiny diagram doesn't fill the screen with
+    // 50pt text. 4x is comfortable for most flowcharts.
+    const fit = Math.min(availW / _baseW, availH / _baseH, 4);
+    _scale = Math.max(0.1, fit);
+    _tx = (wrapRect.width  - _baseW * _scale) / 2;
+    _ty = (wrapRect.height - _baseH * _scale) / 2;
+    applyTransform();
+  }}
+  // gx_reset_view is exposed to Python; map it to the auto-fit so the
+  // "Reset View" affordance and a fresh render both land at optimal size.
+  window.gx_reset_view = fitToWindow;
+  window.gx_fit = fitToWindow;
 
   wrap.addEventListener('wheel', function (e) {{
     e.preventDefault();
@@ -360,8 +421,22 @@ PAGE_HTML = f"""<!doctype html>
   }});
 
   wrap.addEventListener('dblclick', function (e) {{
+    // Double-click re-fits the diagram to the pane (rather than
+    // snapping to 1:1) so the user gets the same auto-fit they had
+    // when the diagram first rendered.
     e.preventDefault();
-    resetTransform();
+    fitToWindow();
+  }});
+
+  // Re-fit on window/pane resize so the diagram always uses the pane.
+  // Debounced via rAF so a continuous resize doesn't fight the user.
+  let _resizeRaf = 0;
+  window.addEventListener('resize', function () {{
+    if (_resizeRaf) cancelAnimationFrame(_resizeRaf);
+    _resizeRaf = requestAnimationFrame(function () {{
+      _resizeRaf = 0;
+      fitToWindow();
+    }});
   }});
 
   window.addEventListener('load', function () {{
