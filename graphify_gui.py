@@ -3478,6 +3478,15 @@ class GraphifyApp:
             self._auto_launch_mermaid_view()
         except Exception:
             pass
+        # Right pane defaults to the Mermaid tab so the user lands on
+        # the diagram view ready to click any node.
+        try:
+            self.notebook.select(self.TAB_MERMAID)
+            self.mermaid_status_var.set(
+                "Click any node in the graph to render its diagram here."
+            )
+        except Exception:
+            pass
 
     # ---- focus mode (delegates to vis.js subprocess via IPC) ------------
 
@@ -4700,7 +4709,47 @@ class GraphifyApp:
         self.status_var.set(msg)
 
 
+def _hide_console_window_on_windows() -> None:
+    """Detach + hide any console window we inherited.
+
+    When the GUI is launched via Graphify.vbs or with pythonw.exe there
+    is no console at all. But when the user double-clicks Graphify.bat
+    or runs `python graphify_gui.py` from cmd, an attached console
+    window stays visible behind the GUI for the entire session. This
+    hides it once Tk is up so the desktop stays clean.
+
+    The window is only HIDDEN, not killed: the cmd / python process
+    continues to run inside it silently, and exits when the GUI exits.
+    The GUI is not affected.
+
+    Skipped under GRAPHIFY_TEST_AUTOQUIT so CI can capture stdout.
+    """
+    if os.name != "nt":
+        return
+    if os.environ.get("GRAPHIFY_TEST_AUTOQUIT"):
+        return
+    if os.environ.get("GRAPHIFY_KEEP_CONSOLE"):
+        return  # opt-out for users who want the console for debugging
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        user32 = ctypes.windll.user32
+        hwnd = kernel32.GetConsoleWindow()
+        if not hwnd:
+            return  # already silent (pythonw.exe path)
+        SW_HIDE = 0
+        user32.ShowWindow(hwnd, SW_HIDE)
+        # Detach our process from the console so a subsequent print()
+        # doesn't error out if the parent closed the window.
+        kernel32.FreeConsole()
+    except Exception:
+        # Best-effort. If anything goes wrong we'd rather leave the
+        # console visible than crash the launcher.
+        pass
+
+
 def main() -> int:
+    _hide_console_window_on_windows()
     root = Tk()
     GraphifyApp(root)
     # Honored by CI: open the window, schedule destruction, exit cleanly.
