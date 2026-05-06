@@ -35,6 +35,33 @@ MERMAID_SRC = (
     else "<script src='https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js'></script>"
 )
 
+# Theme is set by the GUI parent via this env var. "default" = light,
+# "dark" = dark. Falls back to dark which matches the previous behavior.
+MERMAID_THEME = os.environ.get("GRAPHIFY_MERMAID_THEME", "dark")
+if MERMAID_THEME not in ("default", "dark", "neutral", "forest", "base"):
+    MERMAID_THEME = "dark"
+
+# Page background and text colors track the theme so the surrounding
+# chrome (status bar, explanation panel) doesn't clash with the diagram.
+if MERMAID_THEME == "default":
+    THEME_BG = "#f6f8fb"
+    THEME_PANEL = "#eef1f7"
+    THEME_PANEL_ALT = "#e2e7f0"
+    THEME_FG = "#1a2233"
+    THEME_FG_DIM = "#5b6678"
+    THEME_ACCENT = "#1e7fb8"
+    THEME_BORDER = "#aab4c3"
+    THEME_ERR = "#c0392b"
+else:
+    THEME_BG = "#162033"
+    THEME_PANEL = "#101826"
+    THEME_PANEL_ALT = "#1d2a40"
+    THEME_FG = "#e7ecf3"
+    THEME_FG_DIM = "#9aa6b8"
+    THEME_ACCENT = "#5ac6ff"
+    THEME_BORDER = "#1d2a40"
+    THEME_ERR = "#ff7a90"
+
 PAGE_HTML = f"""<!doctype html>
 <html lang='en'>
 <head>
@@ -46,8 +73,8 @@ PAGE_HTML = f"""<!doctype html>
     margin: 0;
     padding: 0;
     height: 100%;
-    background: #162033;
-    color: #e7ecf3;
+    background: {THEME_BG};
+    color: {THEME_FG};
     font-family: -apple-system, Segoe UI, Roboto, sans-serif;
     font-size: 12px;
     overflow: hidden;
@@ -59,23 +86,23 @@ PAGE_HTML = f"""<!doctype html>
   }}
   #status {{
     padding: 8px 14px;
-    color: #9aa6b8;
-    border-bottom: 1px solid #1d2a40;
-    background: #101826;
+    color: {THEME_FG_DIM};
+    border-bottom: 1px solid {THEME_BORDER};
+    background: {THEME_PANEL};
     position: sticky;
     top: 0;
     z-index: 10;
   }}
   #legend {{
     padding: 6px 14px;
-    color: #9aa6b8;
+    color: {THEME_FG_DIM};
     font-size: 11px;
-    border-bottom: 1px solid #1d2a40;
-    background: #101826;
+    border-bottom: 1px solid {THEME_BORDER};
+    background: {THEME_PANEL};
   }}
   #legend code {{
-    background: #1d2a40;
-    color: #5ac6ff;
+    background: {THEME_PANEL_ALT};
+    color: {THEME_ACCENT};
     padding: 1px 4px;
     border-radius: 3px;
   }}
@@ -86,28 +113,28 @@ PAGE_HTML = f"""<!doctype html>
     flex: 1 1 auto;
     min-height: 200px;
     cursor: grab;
-    background: #162033;
+    background: {THEME_BG};
   }}
   #explanation {{
     flex: 0 0 auto;
     max-height: 32%;
     overflow-y: auto;
-    border-top: 1px solid #1d2a40;
+    border-top: 1px solid {THEME_BORDER};
     padding: 8px 14px;
-    background: #101826;
-    color: #c8d4e3;
+    background: {THEME_PANEL};
+    color: {THEME_FG};
     font-size: 11.5px;
     line-height: 1.45;
   }}
   #explanation h4 {{
     margin: 0 0 6px 0;
     font-size: 11px;
-    color: #5ac6ff;
+    color: {THEME_ACCENT};
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }}
   #explanation .empty {{
-    color: #9aa6b8;
+    color: {THEME_FG_DIM};
     font-style: italic;
   }}
   #explanation ul {{
@@ -116,8 +143,8 @@ PAGE_HTML = f"""<!doctype html>
   }}
   #explanation li {{ margin: 1px 0; }}
   #explanation code {{
-    background: #1d2a40;
-    color: #5ac6ff;
+    background: {THEME_PANEL_ALT};
+    color: {THEME_ACCENT};
     padding: 1px 4px;
     border-radius: 3px;
   }}
@@ -142,29 +169,29 @@ PAGE_HTML = f"""<!doctype html>
     bottom: 10px;
     padding: 4px 8px;
     background: rgba(16, 24, 38, 0.85);
-    color: #9aa6b8;
-    border: 1px solid #1d2a40;
+    color: {THEME_FG_DIM};
+    border: 1px solid {THEME_BORDER};
     border-radius: 4px;
     font-size: 10px;
     pointer-events: none;
     z-index: 5;
   }}
-  /* Light text against dark background */
+  /* Diagram label fill follows the active theme. */
   #stage .nodeLabel, #stage .edgeLabel, #stage text {{
-    fill: #e7ecf3 !important;
-    color: #e7ecf3 !important;
+    fill: {THEME_FG} !important;
+    color: {THEME_FG} !important;
   }}
   #stage .edgeLabel {{
-    background: #162033 !important;
+    background: {THEME_BG} !important;
   }}
   .empty {{
     padding: 40px 14px;
-    color: #9aa6b8;
+    color: {THEME_FG_DIM};
     text-align: center;
   }}
   .err {{
     padding: 14px;
-    color: #ff7a90;
+    color: {THEME_ERR};
     white-space: pre-wrap;
     font-family: Consolas, Menlo, monospace;
     font-size: 11px;
@@ -201,16 +228,16 @@ PAGE_HTML = f"""<!doctype html>
   // mermaid.render() to keep diagrams swappable.
   mermaid.initialize({{
     startOnLoad: false,
-    theme: 'dark',
+    theme: '{MERMAID_THEME}',
     themeVariables: {{
-      darkMode: true,
-      background: '#162033',
-      primaryColor: '#1d2a40',
-      primaryTextColor: '#e7ecf3',
-      primaryBorderColor: '#33415a',
-      lineColor: '#5ac6ff',
-      secondaryColor: '#162033',
-      tertiaryColor: '#101826'
+      darkMode: {('false' if MERMAID_THEME == 'default' else 'true')},
+      background: '{THEME_BG}',
+      primaryColor: '{THEME_PANEL_ALT}',
+      primaryTextColor: '{THEME_FG}',
+      primaryBorderColor: '{THEME_BORDER}',
+      lineColor: '{THEME_ACCENT}',
+      secondaryColor: '{THEME_BG}',
+      tertiaryColor: '{THEME_PANEL}'
     }},
     flowchart: {{ curve: 'basis', useMaxWidth: true }}
   }});
