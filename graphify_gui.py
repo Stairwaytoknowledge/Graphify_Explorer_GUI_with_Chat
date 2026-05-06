@@ -994,6 +994,36 @@ class GraphifyApp:
         bg = PALETTE["panel_alt"] if role == "panel" else PALETTE["bg"]
         w.configure(background=bg, highlightbackground=bg)
 
+    def _install_focus_force(self, widget) -> None:
+        """Make Button-1 / FocusIn on `widget` seize keyboard focus.
+
+        Win32 SetParent embeds (vis.js graph + Mermaid pane) live in
+        the same window as the Tk widgets but in a separate child
+        HWND. After the user clicks inside one of those embedded
+        WebView2 controls, keyboard focus is on the WebView and Tk's
+        normal focus chain does NOT pull it back when the user later
+        clicks a Tk Entry. The cursor blinks but keystrokes still go
+        to the WebView. This binding forces keyboard focus onto the
+        Tk widget regardless of who held it before, which is what
+        the user expects when they click an input box.
+
+        Safe to call on any widget that has focus_force / focus_set;
+        no-op on widgets without those methods.
+        """
+        def _force(_event=None):
+            try:
+                widget.focus_force()
+            except tk.TclError:
+                try:
+                    widget.focus_set()
+                except tk.TclError:
+                    pass
+        try:
+            widget.bind("<Button-1>", _force, add="+")
+            widget.bind("<FocusIn>", _force, add="+")
+        except tk.TclError:
+            pass
+
     # ---------------------------------------------------------- widgets
 
     def _build_widgets(self) -> None:
@@ -1006,6 +1036,7 @@ class GraphifyApp:
         )
         entry = ttk.Entry(top, textvariable=self.path_var)
         entry.pack(side=LEFT, fill="x", expand=True, padx=(0, 6))
+        self._install_focus_force(entry)
         ttk.Button(top, text="Browse…", command=self._browse).pack(side=LEFT)
 
         # Optional: custom output directory (junction/symlink to graphify-out).
@@ -1016,9 +1047,9 @@ class GraphifyApp:
             text="Output (optional)",
             style="Dim.TLabel",
         ).pack(side=LEFT, padx=(0, 6))
-        ttk.Entry(out_row, textvariable=self.output_dir_var).pack(
-            side=LEFT, fill="x", expand=True, padx=(0, 6)
-        )
+        out_entry = ttk.Entry(out_row, textvariable=self.output_dir_var)
+        out_entry.pack(side=LEFT, fill="x", expand=True, padx=(0, 6))
+        self._install_focus_force(out_entry)
         ttk.Button(out_row, text="Browse…", command=self._browse_output).pack(
             side=LEFT
         )
@@ -1190,6 +1221,7 @@ class GraphifyApp:
         )
         self.query_entry = ttk.Entry(qf, textvariable=self.query_var)
         self.query_entry.pack(fill="x", padx=4, pady=(4, 6))
+        self._install_focus_force(self.query_entry)
         # Autocomplete: command shapes + symbols from the loaded graph.
         # Candidates list rebuilt on every graph load via _load_graph_into_view.
         self._graph_candidates: list[graphify_autocomplete.Candidate] = []
@@ -2931,6 +2963,7 @@ class GraphifyApp:
         self.chat_entry = ttk.Entry(inp, textvariable=self.chat_input_var)
         self.chat_entry.pack(side=LEFT, fill="x", expand=True, padx=(0, 6))
         self.chat_entry.bind("<Return>", lambda e: self._chat_send())
+        self._install_focus_force(self.chat_entry)
         self.chat_send_btn = ttk.Button(
             inp, text="Send", style="Accent.TButton", command=self._chat_send
         )

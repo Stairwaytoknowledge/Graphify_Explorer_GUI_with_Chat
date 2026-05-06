@@ -193,6 +193,29 @@ class QueryButtonRoutingTest(unittest.TestCase):
         self.app._path_between()
         self.assertTrue(self._output_tab_selected())
 
+    def test_focus_force_bindings_installed_on_query_entry(self) -> None:
+        # Regression: clicking the Entry sometimes failed to take
+        # keyboard focus because Win32 SetParent embeds (vis.js,
+        # Mermaid) had grabbed it. _install_focus_force binds
+        # Button-1 + FocusIn on every Entry to call focus_force(),
+        # which seizes keyboard focus regardless of which child HWND
+        # held it before.
+        binds = self.app.query_entry.bind()
+        self.assertIn("<Button-1>", binds,
+                      "query_entry missing Button-1 binding")
+        self.assertIn("<FocusIn>", binds,
+                      "query_entry missing FocusIn binding")
+
+    def test_focus_force_helper_is_safe_on_any_widget(self) -> None:
+        # The helper must not raise on widgets that don't accept
+        # focus (Frames, Labels, etc.) - we use add="+" so existing
+        # bindings survive, but the helper itself is bind-and-forget.
+        import tkinter as tk
+        f = tk.Frame(self.root)
+        # Should not raise.
+        self.app._install_focus_force(f)
+        f.destroy()
+
     def test_empty_query_does_not_run_or_switch(self) -> None:
         # Park on a non-Output tab; an empty query should leave it.
         self.app.query_var.set("")
