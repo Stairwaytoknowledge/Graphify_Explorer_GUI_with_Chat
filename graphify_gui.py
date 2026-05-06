@@ -687,12 +687,12 @@ class GraphifyApp:
                 ("active", PALETTE["accent"]),
                 ("disabled", PALETTE["panel"]),
             ],
-            foreground=[("active", "#0b1220")],
+            foreground=[("active", PALETTE["on_accent"])],
         )
         style.configure(
             "Accent.TButton",
             background=PALETTE["accent"],
-            foreground="#0b1220",
+            foreground=PALETTE["on_accent"],
             padding=(12, 7),
         )
         style.map(
@@ -735,6 +735,47 @@ class GraphifyApp:
         )
         style.configure(
             "TPanedwindow", background=PALETTE["bg"]
+        )
+        # Treeview ("Files in this graph", drill-downs). ttk's clam
+        # default is white/black which becomes a glaring white panel
+        # in dark mode and an unreadable dark-on-dark in cyberpunk.
+        # Drive every Treeview color from the active palette so the
+        # widget flips with the theme.
+        style.configure(
+            "Treeview",
+            background=PALETTE["panel_alt"],
+            foreground=PALETTE["fg"],
+            fieldbackground=PALETTE["panel_alt"],
+            borderwidth=0,
+        )
+        style.map(
+            "Treeview",
+            background=[("selected", PALETTE["accent"])],
+            foreground=[("selected", PALETTE["on_accent"])],
+        )
+        style.configure(
+            "Treeview.Heading",
+            background=PALETTE["panel"],
+            foreground=PALETTE["fg"],
+            borderwidth=0,
+        )
+        # Notebook tabs: header bg / fg + active-tab contrast.
+        style.configure(
+            "TNotebook",
+            background=PALETTE["bg"],
+            borderwidth=0,
+        )
+        style.configure(
+            "TNotebook.Tab",
+            background=PALETTE["panel"],
+            foreground=PALETTE["fg_dim"],
+            padding=(10, 5),
+            borderwidth=0,
+        )
+        style.map(
+            "TNotebook.Tab",
+            background=[("selected", PALETTE["panel_alt"])],
+            foreground=[("selected", PALETTE["fg"])],
         )
 
     # ------------------------------------------------------ menu + theme
@@ -901,6 +942,19 @@ class GraphifyApp:
             elif cls == "Canvas":
                 try:
                     self._color_canvas_widget(c, "panel")
+                except tk.TclError:
+                    pass
+            elif cls == "Listbox":
+                # Listbox is a classic Tk widget; ttk styles don't reach
+                # it, so we re-apply the palette directly so it flips
+                # with the theme like Text and Canvas do.
+                try:
+                    c.configure(
+                        background=PALETTE["panel_alt"],
+                        foreground=PALETTE["fg"],
+                        selectbackground=PALETTE["accent"],
+                        selectforeground=PALETTE["on_accent"],
+                    )
                 except tk.TclError:
                     pass
             elif cls == "Toplevel":
@@ -1223,7 +1277,7 @@ class GraphifyApp:
             background=PALETTE["panel_alt"],
             foreground=PALETTE["fg"],
             selectbackground=PALETTE["accent"],
-            selectforeground="#0b1220",
+            selectforeground=PALETTE["on_accent"],
             relief="flat",
             borderwidth=0,
             activestyle="none",
@@ -2639,12 +2693,18 @@ class GraphifyApp:
                 lines.append(f"    {su} {arrow} {sv}")
 
         # classDef + class assignments for community colors.
+        # Solid fill (no alpha) so the contrast against the diagram
+        # background is predictable; text color is auto-picked by the
+        # luma of THAT fill so it stays readable regardless of the
+        # active GUI theme (dark / light / cyberpunk).
         for cid, _ in sorted(by_comm.items()):
             if cid < 0:
                 continue
             color = PALETTE_HEX[cid % len(PALETTE_HEX)]
+            text = graphify_theme.text_for_bg(color)
             lines.append(
-                f"    classDef cls_{cid} fill:{color}22,stroke:{color},color:#e7ecf3"
+                f"    classDef cls_{cid} "
+                f"fill:{color},stroke:{color},color:{text}"
             )
         for cid, members in sorted(by_comm.items()):
             if cid < 0:

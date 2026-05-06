@@ -212,8 +212,12 @@ PAGE_HTML = f"""<!doctype html>
     pointer-events: none;
     z-index: 5;
   }}
-  /* Diagram label fill follows the active theme. */
-  #stage .nodeLabel, #stage .edgeLabel, #stage text {{
+  /* Edge labels + raw SVG text (subgraph titles, axis labels) follow
+     the active theme. Node labels are intentionally OMITTED here so
+     the per-class `color:` set by classDef wins, which keeps text
+     readable against bright community fills (yellow, red, mint,
+     cyan, etc.) regardless of the GUI theme. */
+  #stage .edgeLabel, #stage text {{
     fill: {THEME_FG} !important;
     color: {THEME_FG} !important;
   }}
