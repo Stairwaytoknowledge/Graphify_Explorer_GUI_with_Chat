@@ -153,6 +153,48 @@ jobs:
           fi
           PYTHONPATH=. "$PY" -m unittest -v tests.test_remote
 
+      - name: Theme tests (palette, auto mode, settings persistence)
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            PY=".venv/Scripts/python.exe"
+          else
+            PY=".venv/bin/python"
+          fi
+          PYTHONPATH=. "$PY" -m unittest -v tests.test_theme
+
+      - name: Hot theme switch in GUI
+        shell: bash
+        env:
+          DISPLAY: ":99"
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            PY=".venv/Scripts/python.exe"
+          else
+            PY=".venv/bin/python"
+          fi
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            pgrep Xvfb >/dev/null || (Xvfb :99 -screen 0 1024x768x24 & sleep 1)
+          fi
+          PYTHONPATH=. "$PY" - <<'PY'
+          import graphify_gui as g
+          import graphify_theme as gt
+          import tkinter as tk
+          root = tk.Tk()
+          app = g.GraphifyApp(root)
+          app._switch_theme("light")
+          assert g.PALETTE == gt.LIGHT_PALETTE, "light theme did not apply"
+          app._switch_theme("dark")
+          assert g.PALETTE == gt.DARK_PALETTE, "dark theme did not apply"
+          app._switch_theme("auto")
+          assert g.PALETTE in (gt.DARK_PALETTE, gt.LIGHT_PALETTE), "auto did not resolve"
+          # Restore default for cleanup.
+          app._switch_theme("dark")
+          root.after(200, root.destroy)
+          root.mainloop()
+          print("hot theme switch OK")
+          PY
+
       - name: Unit tests for URL/path detection helpers
         shell: bash
         run: |

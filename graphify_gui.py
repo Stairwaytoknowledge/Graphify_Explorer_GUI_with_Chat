@@ -57,6 +57,8 @@ import networkx as nx
 import graphify_clone
 # Local module: safe read-only mirror flow for remote / network mounts.
 import graphify_remote
+# Local module: themes + settings persistence.
+import graphify_theme
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -65,19 +67,14 @@ ICON_PNG = APP_DIR / "icon.png"
 
 
 # ----------------------------------------------------------------------- theme
+#
+# PALETTE is a live mutable dict. graphify_theme owns the values; the
+# GUI re-applies styles after a swap. Modules that bound to PALETTE at
+# import time keep working because the object identity is preserved.
 
-PALETTE = {
-    "bg":        "#101826",   # window background
-    "panel":     "#162033",   # panel background
-    "panel_alt": "#1d2a40",   # secondary panel
-    "fg":        "#e7ecf3",   # primary text
-    "fg_dim":    "#9aa6b8",   # secondary text
-    "accent":    "#5ac6ff",   # cyan accent
-    "accent2":   "#7c5cff",   # violet accent
-    "ok":        "#5fd38f",   # success
-    "warn":      "#ffb454",   # warning
-    "edge":      "#33415a",   # edges in the graph
-}
+PALETTE: dict[str, str] = graphify_theme.palette_for_mode(
+    graphify_theme.load_theme_mode()
+)
 
 # Small palette for community coloring on the graph.
 COMMUNITY_COLORS = [
@@ -442,8 +439,22 @@ class GraphifyApp:
         self._job_label: str = ""
         self._alert_on_done: bool = False
 
+        # Theme state: the user's preference + the current effective
+        # mode (resolved by `auto`). The auto-tick re-evaluates this
+        # every minute when the preference is "auto".
+        self.theme_mode_pref: str = graphify_theme.load_theme_mode()
+        self._effective_theme: str = graphify_theme.effective_mode(
+            self.theme_mode_pref
+        )
+        # Widgets that need direct color kwargs (tk.Text, tk.Canvas)
+        # register themselves here so a theme swap can recolor them.
+        self._themed_text_widgets: list = []
+        self._themed_canvas_widgets: list = []
+
+        self._build_menu()
         self._build_widgets()
         self._poll_output()
+        self._schedule_auto_theme_tick()
 
         graphify = graphify_executable()
         if graphify:
@@ -569,6 +580,199 @@ class GraphifyApp:
         style.configure(
             "TPanedwindow", background=PALETTE["bg"]
         )
+
+    # ------------------------------------------------------ menu + theme
+
+    def _build_menu(self) -> None:
+        """Top-of-window menu. Currently only View > Theme."""
+        menubar = tk.Menu(self.root)
+        view = tk.Menu(menubar, tearoff=False)
+        self._theme_var = StringVar(value=self.theme_mode_pref)
+        for mode, label in (
+            ("dark", "Dark"),
+            ("light", "Light"),
+            ("auto", "Auto (by time of day)"),
+        ):
+            view.add_radiobutton(
+                label=label,
+                variable=self._theme_var,
+                value=mode,
+                command=lambda m=mode: self._switch_theme(m),
+            )
+        menubar.add_cascade(label="View", menu=view)
+        try:
+            self.root.configure(menu=menubar)
+        except tk.TclError:
+            # Some headless Tk builds reject menubars. Not fatal.
+            pass
+
+    def _switch_theme(self, mode: str) -> None:
+        """User picked a new theme mode. Persist + apply hot."""
+        mode = graphify_theme.resolve_mode(mode)
+        self.theme_mode_pref = mode
+        graphify_theme.save_theme_mode(mode)
+        self._apply_current_theme(force=True)
+
+    def _apply_current_theme(self, force: bool = False) -> None:
+        """Compute effective mode, swap PALETTE, re-apply ttk + widgets.
+
+        With `force=False` (the auto-tick path) this is a no-op when
+        the effective mode hasn't changed, which keeps the auto poll
+        cheap and avoids style flicker.
+        """
+        new_eff = graphify_theme.effective_mode(self.theme_mode_pref)
+        if not force and new_eff == self._effective_theme:
+            return
+        self._effective_theme = new_eff
+        new_palette = graphify_theme.palette_for_mode(self.theme_mode_pref)
+        # Mutate in place so any outer reference to PALETTE picks up
+        # the new values without a re-import.
+        graphify_theme.update_palette_in_place(PALETTE, new_palette)
+        # Re-run the ttk style configuration with the new colors.
+        self._apply_theme()
+        # Re-color the registered tk.Text / tk.Canvas widgets.
+        self._reapply_themed_widgets()
+        # Status feedback so the user sees the swap took effect.
+        try:
+            self._set_status(
+                f"Theme: {self.theme_mode_pref}"
+                + (f" ({new_eff})" if self.theme_mode_pref == "auto" else "")
+            )
+        except Exception:
+            pass
+
+    def _schedule_auto_theme_tick(self) -> None:
+        """Re-evaluate auto mode once a minute.
+
+        Cheap: the tick is a no-op except at the daytime boundary.
+        """
+        try:
+            self.root.after(60_000, self._auto_theme_tick)
+        except Exception:
+            pass
+
+    def _auto_theme_tick(self) -> None:
+        if self.theme_mode_pref == "auto":
+            self._apply_current_theme(force=False)
+        # Reschedule unconditionally; user might switch to auto later.
+        self._schedule_auto_theme_tick()
+
+    # ------------------------------------------------------ widget registry
+
+    def _register_text_widget(
+        self, w, role: str = "panel", tags: dict | None = None
+    ) -> None:
+        """Track a tk.Text so it can be re-themed on a mode change.
+
+        `role` picks the role-to-color mapping (panel = panel_alt bg).
+        `tags` is optional: {tag_name: {"foreground": "fg_dim", ...}}
+        for tag_configure roles.
+        """
+        self._themed_text_widgets.append((w, role, tags or {}))
+
+    def _register_canvas_widget(self, w, role: str = "panel") -> None:
+        self._themed_canvas_widgets.append((w, role))
+
+    def _reapply_themed_widgets(self) -> None:
+        """Walk the entire widget tree and re-color tk.Text + tk.Canvas.
+
+        ttk styles handle the rest. This catches every Text and Canvas
+        the GUI ever creates without each call site needing to register
+        manually. We also walk Toplevel windows (popups, drill-downs).
+        """
+        # Re-color every Toplevel including the root window.
+        try:
+            self.root.configure(bg=PALETTE["bg"])
+        except tk.TclError:
+            pass
+        for top in self._iter_toplevels():
+            try:
+                top.configure(bg=PALETTE["bg"])
+            except tk.TclError:
+                continue
+            self._recolor_subtree(top)
+        self._recolor_subtree(self.root)
+        # Honor any explicit registrations (used for special tag colors).
+        for w, role, tags in self._themed_text_widgets:
+            if not self._widget_alive(w):
+                continue
+            try:
+                self._color_text_widget(w, role)
+                for tag_name, kwargs in tags.items():
+                    resolved = {
+                        k: PALETTE[v] if isinstance(v, str) and v in PALETTE else v
+                        for k, v in kwargs.items()
+                    }
+                    w.tag_configure(tag_name, **resolved)
+            except tk.TclError:
+                continue
+        self._themed_text_widgets = [
+            t for t in self._themed_text_widgets if self._widget_alive(t[0])
+        ]
+        self._themed_canvas_widgets = [
+            t for t in self._themed_canvas_widgets if self._widget_alive(t[0])
+        ]
+
+    def _iter_toplevels(self):
+        """Iterate every Toplevel (including modal popups) under root."""
+        try:
+            children = self.root.winfo_children()
+        except tk.TclError:
+            return
+        for c in children:
+            try:
+                if isinstance(c, tk.Toplevel):
+                    yield c
+            except tk.TclError:
+                continue
+
+    def _recolor_subtree(self, parent) -> None:
+        try:
+            children = parent.winfo_children()
+        except tk.TclError:
+            return
+        for c in children:
+            try:
+                cls = c.winfo_class()
+            except tk.TclError:
+                continue
+            if cls == "Text":
+                try:
+                    self._color_text_widget(c, "panel")
+                except tk.TclError:
+                    pass
+            elif cls == "Canvas":
+                try:
+                    self._color_canvas_widget(c, "panel")
+                except tk.TclError:
+                    pass
+            elif cls == "Toplevel":
+                try:
+                    c.configure(bg=PALETTE["bg"])
+                except tk.TclError:
+                    pass
+            # Recurse - ttk widgets and frames may contain Text/Canvas.
+            self._recolor_subtree(c)
+
+    def _widget_alive(self, w) -> bool:
+        try:
+            return bool(w.winfo_exists())
+        except tk.TclError:
+            return False
+
+    def _color_text_widget(self, w, role: str = "panel") -> None:
+        bg = PALETTE["panel_alt"] if role == "panel" else PALETTE["bg"]
+        w.configure(
+            background=bg,
+            foreground=PALETTE["fg"],
+            insertbackground=PALETTE["fg"],
+            selectbackground=PALETTE["accent"],
+            selectforeground=PALETTE["on_accent"],
+        )
+
+    def _color_canvas_widget(self, w, role: str = "panel") -> None:
+        bg = PALETTE["panel_alt"] if role == "panel" else PALETTE["bg"]
+        w.configure(background=bg, highlightbackground=bg)
 
     # ---------------------------------------------------------- widgets
 
@@ -1997,6 +2201,14 @@ class GraphifyApp:
             )
             return
         try:
+            # Pass the active theme name so the Mermaid renderer can
+            # initialize its theme to match. Reload the diagram after a
+            # theme change to pick up the new colors.
+            mermaid_theme = graphify_theme.mermaid_theme_for(
+                self._effective_theme
+            )
+            env = os.environ.copy()
+            env["GRAPHIFY_MERMAID_THEME"] = mermaid_theme
             self.mermaid_proc = subprocess.Popen(
                 [sys.executable, str(script)],
                 stdin=subprocess.PIPE,
@@ -2005,6 +2217,7 @@ class GraphifyApp:
                 text=True,
                 bufsize=1,
                 creationflags=_NO_CONSOLE_FLAGS,
+                env=env,
             )
         except Exception as exc:
             self.mermaid_status_var.set(f"failed to start: {exc}")
