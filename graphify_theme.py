@@ -185,6 +185,11 @@ def mermaid_theme_for(mode_or_palette: str | dict[str, str]) -> str:
 def _is_light(hex_color: str) -> bool:
     try:
         h = hex_color.lstrip("#")
+        # Strip alpha channel if present (#RRGGBBAA / #RGBA forms).
+        if len(h) == 8:
+            h = h[:6]
+        elif len(h) == 4:
+            h = h[:3]
         if len(h) == 3:
             h = "".join(ch * 2 for ch in h)
         r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
@@ -193,6 +198,23 @@ def _is_light(hex_color: str) -> bool:
         return luma > 128
     except (ValueError, IndexError):
         return False
+
+
+# Strong-contrast text colors that read well against ANY background
+# in their tier. Keeping the dark text slightly off pure black and the
+# light text slightly off pure white avoids harshness on saturated
+# fills (red, yellow, cyan, etc.) without losing contrast.
+_TEXT_ON_LIGHT = "#0a0e18"
+_TEXT_ON_DARK = "#f3f6fc"
+
+
+def text_for_bg(hex_color: str) -> str:
+    """Pick a readable text color (near-black or near-white) for the
+    given background. Used wherever a UI element draws text on a
+    surface whose color is data-driven (community fills in Mermaid,
+    custom highlights, palette swatches) so the text auto-flips when
+    the surface is light vs dark."""
+    return _TEXT_ON_LIGHT if _is_light(hex_color) else _TEXT_ON_DARK
 
 
 # ----- Live update helpers ----------------------------------------------

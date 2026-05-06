@@ -200,6 +200,72 @@ class MermaidThemeTest(unittest.TestCase):
     def test_is_light_invalid_returns_false(self) -> None:
         self.assertFalse(gt._is_light("not-a-color"))
 
+    def test_is_light_strips_alpha(self) -> None:
+        # 8-char hex #RRGGBBAA must be evaluated on RGB only.
+        self.assertTrue(gt._is_light("#ffffff22"))
+        self.assertFalse(gt._is_light("#000000ff"))
+
+
+class TextForBgTest(unittest.TestCase):
+    def test_dark_text_on_light_bg(self) -> None:
+        # Saturated bright colors that blew up the original Mermaid
+        # contrast: yellow, mint, cyan, orange. All should pick the
+        # dark text variant.
+        for c in ("#ffffff", "#ffd166", "#5fd38f", "#ffb454",
+                  "#9bd4ff", "#5ac6ff"):
+            self.assertEqual(gt.text_for_bg(c), gt._TEXT_ON_LIGHT,
+                             f"expected dark text on {c}")
+
+    def test_light_text_on_dark_bg(self) -> None:
+        for c in ("#000000", "#101826", "#0a0418", "#7c5cff",
+                  "#1c0d4a"):
+            self.assertEqual(gt.text_for_bg(c), gt._TEXT_ON_DARK,
+                             f"expected light text on {c}")
+
+    def test_handles_alpha_suffix(self) -> None:
+        # Same color +/- alpha should pick the same text color.
+        self.assertEqual(
+            gt.text_for_bg("#ffd166"), gt.text_for_bg("#ffd16622"),
+        )
+
+    def test_handles_3char_hex(self) -> None:
+        self.assertEqual(gt.text_for_bg("#fff"), gt._TEXT_ON_LIGHT)
+        self.assertEqual(gt.text_for_bg("#000"), gt._TEXT_ON_DARK)
+
+    def test_garbage_falls_back_to_dark_text(self) -> None:
+        # Invalid hex defaults to "not light", which means the dark
+        # text variant (white-ish) is chosen. Better than crashing.
+        self.assertEqual(gt.text_for_bg("nope"), gt._TEXT_ON_DARK)
+
+
+class CommunityColorContrastTest(unittest.TestCase):
+    """Every community color the Mermaid annotator uses must produce
+    a readable contrast pair via text_for_bg."""
+
+    # Mirrors graphify_gui.py PALETTE_HEX in _graph_to_mermaid_annotated.
+    COMMUNITY_COLORS = (
+        "#5ac6ff", "#ff7a90", "#7c5cff", "#5fd38f", "#ffb454",
+        "#ff8b3d", "#3dd1c5", "#d2a4ff", "#ffd166", "#9bd4ff",
+    )
+
+    def test_each_color_yields_a_text_variant(self) -> None:
+        for c in self.COMMUNITY_COLORS:
+            text = gt.text_for_bg(c)
+            self.assertIn(text, (gt._TEXT_ON_LIGHT, gt._TEXT_ON_DARK))
+
+    def test_yellow_picks_dark_text_not_white(self) -> None:
+        # The original bug: bright yellow (#ffd166) + ash text
+        # (#e7ecf3) was unreadable. Confirm the fix flips to dark.
+        self.assertEqual(gt.text_for_bg("#ffd166"), gt._TEXT_ON_LIGHT)
+
+    def test_red_picks_dark_text_not_white(self) -> None:
+        # Same bug for red community fills.
+        self.assertEqual(gt.text_for_bg("#ff7a90"), gt._TEXT_ON_LIGHT)
+
+    def test_purple_picks_light_text(self) -> None:
+        # And the inverse: a dark community fill must keep light text.
+        self.assertEqual(gt.text_for_bg("#7c5cff"), gt._TEXT_ON_DARK)
+
 
 class UpdatePaletteInPlaceTest(unittest.TestCase):
     def test_preserves_identity(self) -> None:
