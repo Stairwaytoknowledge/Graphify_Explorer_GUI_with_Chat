@@ -100,6 +100,8 @@ import graphify_clone
 import graphify_remote
 # Local module: themes + settings persistence.
 import graphify_theme
+# Local module: autocomplete popup for the "Ask the graph" entry.
+import graphify_autocomplete
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -830,6 +832,13 @@ class GraphifyApp:
         self._apply_theme()
         # Re-color the registered tk.Text / tk.Canvas widgets.
         self._reapply_themed_widgets()
+        # Re-color the autocomplete popup if it has been built.
+        ac = getattr(self, "_autocomplete", None)
+        if ac is not None:
+            try:
+                ac.apply_palette(PALETTE)
+            except Exception:
+                pass
         # Status feedback so the user sees the swap took effect.
         try:
             self._set_status(
@@ -1179,9 +1188,18 @@ class GraphifyApp:
         ttk.Label(qf, text="Ask the graph", style="Title.TLabel").pack(
             anchor="w", padx=4
         )
-        ttk.Entry(qf, textvariable=self.query_var).pack(
-            fill="x", padx=4, pady=(4, 6)
+        self.query_entry = ttk.Entry(qf, textvariable=self.query_var)
+        self.query_entry.pack(fill="x", padx=4, pady=(4, 6))
+        # Autocomplete: command shapes + symbols from the loaded graph.
+        # Candidates list rebuilt on every graph load via _load_graph_into_view.
+        self._graph_candidates: list[graphify_autocomplete.Candidate] = []
+        self._autocomplete = graphify_autocomplete.AutocompletePopup(
+            master=self.root,
+            entry=self.query_entry,
+            candidate_provider=self._autocomplete_candidates,
+            on_select=self._autocomplete_accept,
         )
+        self._autocomplete.apply_palette(PALETTE)
         btnrow = ttk.Frame(qf, style="Panel.TFrame")
         btnrow.pack(fill="x", padx=4)
         ttk.Button(
@@ -3691,6 +3709,14 @@ class GraphifyApp:
             f"loaded from {gp.name}"
         )
 
+        # Rebuild the autocomplete candidate list from the new graph.
+        # Called once here (not on every keystroke) so the per-keystroke
+        # scorer sees a stable, pre-built list. Cheap on graphs of any
+        # realistic size: a 5k-node graph is a few ms.
+        try:
+            self._graph_candidates = graphify_autocomplete.build_graph_candidates(G)
+        except Exception:
+            self._graph_candidates = []
         # Try to attach a previously-built embedding index (no-op if missing
         # or stale by SHA).
         try:
@@ -4528,6 +4554,21 @@ class GraphifyApp:
         if not path:
             return
         self._run_graphify(["watch", str(path)], cwd=path)
+
+    # ---- autocomplete glue ---------------------------------------------
+
+    def _autocomplete_candidates(self):
+        """Provider for the popup. Static command shapes always; symbol
+        candidates only when a graph is loaded."""
+        symbols = getattr(self, "_graph_candidates", []) or []
+        return list(graphify_autocomplete.COMMAND_CANDIDATES) + symbols
+
+    def _autocomplete_accept(self, candidate) -> None:
+        """User picked a suggestion. Fill the Entry only - never auto-run.
+        The user still has to click Query / Explain / Path explicitly."""
+        self.query_var.set(candidate.value)
+
+    # ---- query button handlers -----------------------------------------
 
     def _query(self) -> None:
         self._run_query("query")
