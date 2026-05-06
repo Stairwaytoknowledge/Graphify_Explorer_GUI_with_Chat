@@ -251,6 +251,15 @@ class AutocompletePopup:
             return
         top = tk.Toplevel(self.master)
         top.wm_overrideredirect(True)
+        # Marking the popup as transient to its master prevents
+        # Windows from treating it as an independent app window that
+        # steals keyboard focus when it shows. Without this, typing
+        # into the Entry sometimes goes nowhere because the freshly
+        # raised popup grabbed input focus on certain Windows setups.
+        try:
+            top.wm_transient(self.master.winfo_toplevel())
+        except tk.TclError:
+            pass
         try:
             top.wm_attributes("-topmost", True)
         except tk.TclError:
@@ -330,6 +339,30 @@ class AutocompletePopup:
             except tk.TclError:
                 pass
 
+    def reset(self) -> None:
+        """Hide the popup and restore typing focus on the Entry.
+
+        Belt-and-suspenders against any state where the popup or its
+        focus interaction leaves the Entry unable to receive keystrokes
+        (a Tk-on-Windows quirk seen with overrideredirect Toplevels).
+        Safe to call at any time.
+        """
+        # Cancel any pending debounced refresh so we don't re-show
+        # immediately after this reset.
+        if self._after_id is not None:
+            try:
+                self.master.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+        self._suppress_show = False
+        self.hide()
+        try:
+            self.entry.focus_set()
+            self.entry.icursor("end")
+        except tk.TclError:
+            pass
+
     def is_visible(self) -> bool:
         if self._top is None:
             return False
@@ -370,6 +403,14 @@ class AutocompletePopup:
         self._position()
         try:
             self._top.deiconify()
+        except tk.TclError:
+            pass
+        # Showing the borderless popup can steal keyboard focus on
+        # Windows. Re-anchor focus on the Entry so the next keystroke
+        # types into the box (not a void). The user only enters the
+        # popup explicitly via Down arrow.
+        try:
+            self.entry.focus_set()
         except tk.TclError:
             pass
 
@@ -494,17 +535,26 @@ class AutocompletePopup:
         self._suppress_show = True
         try:
             self.on_select(candidate)
-        finally:
-            # Tk fires KeyRelease for the Return key after on_select; allow
-            # the next user-typed keystroke to re-show the popup.
-            try:
-                self.master.after(0, lambda: setattr(self, "_suppress_show", False))
-            except Exception:
-                self._suppress_show = False
-        self.hide()
-        self.entry.focus_set()
-        # Position the cursor at end of the inserted value.
+        except Exception:
+            # Don't let a buggy on_select handler leave the popup
+            # state corrupted; reset and re-raise.
+            self._suppress_show = False
+            self.reset()
+            raise
+        # Tk fires KeyRelease for the Return key after on_select; allow
+        # the next user-typed keystroke to re-show the popup. We schedule
+        # the clear via `after`, with a fallback timer so the flag can't
+        # ever stay True if the immediate callback fails to fire.
+        def _clear_suppress() -> None:
+            self._suppress_show = False
         try:
+            self.master.after(0, _clear_suppress)
+            self.master.after(250, _clear_suppress)  # safety net
+        except Exception:
+            self._suppress_show = False
+        self.hide()
+        try:
+            self.entry.focus_set()
             self.entry.icursor("end")
         except tk.TclError:
             pass

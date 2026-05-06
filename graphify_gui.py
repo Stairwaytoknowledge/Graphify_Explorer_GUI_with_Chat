@@ -4570,6 +4570,37 @@ class GraphifyApp:
 
     # ---- query button handlers -----------------------------------------
 
+    # Prefixes the user might paste from the CLI form. Stripped before
+    # the value is forwarded to graphify so `graphify query "X"`,
+    # `query "X"`, and bare `X` all behave the same.
+    _QUERY_CLI_PREFIXES = ("graphify query", "query")
+    _EXPLAIN_CLI_PREFIXES = ("graphify explain", "explain")
+    _PATH_CLI_PREFIXES = ("graphify path", "path")
+
+    @staticmethod
+    def _strip_cli_prefix(text: str, prefixes: tuple[str, ...]) -> str:
+        """Remove a leading CLI verb from `text` if present, plus any
+        outer quotes and surrounding whitespace.
+
+        Lets users paste `graphify explain "Personalive"` into the
+        Entry and have just `Personalive` reach the subcommand,
+        instead of graphify searching for the literal CLI invocation
+        as a phrase (which silently matches no nodes).
+        """
+        s = text.strip()
+        for p in sorted(prefixes, key=len, reverse=True):
+            if s.lower().startswith(p.lower()):
+                rest = s[len(p):].lstrip()
+                if rest:
+                    s = rest
+                    break
+        # Strip a single layer of matching quotes, if any.
+        if (s.startswith('"') and s.endswith('"')) or \
+           (s.startswith("'") and s.endswith("'")):
+            if len(s) >= 2:
+                s = s[1:-1].strip()
+        return s
+
     def _query(self) -> None:
         self._run_query("query")
 
@@ -4577,27 +4608,56 @@ class GraphifyApp:
         self._run_query("explain")
 
     def _path_between(self) -> None:
-        q = self.query_var.get().strip()
-        if "|" not in q:
+        # Strip "graphify path" / "path" prefix BEFORE looking for the
+        # `|` separator so `graphify path "A" "B"` and `A|B` both work.
+        raw = self._strip_cli_prefix(
+            self.query_var.get(), self._PATH_CLI_PREFIXES,
+        )
+        # Heuristic: if the user pasted CLI-style space-separated
+        # names but no pipe, treat the first whitespace as the split.
+        if "|" not in raw and " " in raw:
+            a, _, b = raw.partition(" ")
+            a, b = a.strip(' "\''), b.strip(' "\'')
+        elif "|" in raw:
+            a, b = (s.strip(' "\'') for s in raw.split("|", 1))
+        else:
             messagebox.showinfo(
                 "Path between",
                 'Use "A|B" in the query box (two node names separated by "|").',
             )
             return
-        a, b = (s.strip() for s in q.split("|", 1))
+        if not a or not b:
+            messagebox.showinfo(
+                "Path between",
+                "Both endpoints required. Type the box like A|B "
+                'or `path "A" "B"`.',
+            )
+            return
         path = self._selected_path()
         if not path:
             return
+        # Surface the run to the user: switch to Output tab so they
+        # see the command echo + result without having to hunt for it.
+        self._switch_to_output_tab()
         self._run_graphify(["path", a, b], cwd=path)
 
     def _run_query(self, sub: str) -> None:
-        q = self.query_var.get().strip()
+        prefixes = (
+            self._QUERY_CLI_PREFIXES if sub == "query"
+            else self._EXPLAIN_CLI_PREFIXES
+        )
+        q = self._strip_cli_prefix(self.query_var.get(), prefixes)
         if not q:
             messagebox.showwarning("Empty", "Type a query first.")
             return
         path = self._selected_path()
         if not path:
             return
+        # Make the result visible: switch to Output before the
+        # subprocess starts so the user sees the command echo, the
+        # streamed output, and the [exit N] tail without manually
+        # clicking the Output tab.
+        self._switch_to_output_tab()
         self._run_graphify([sub, q], cwd=path)
 
     def _open_html(self) -> None:
